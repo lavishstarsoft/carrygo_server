@@ -46,7 +46,7 @@ router.put('/:id/kyc-personal', driverController.updatePersonalDetails);
 router.put('/:id/kyc-vehicle', driverController.updateVehicleDetails);
 router.put('/:id/kyc-driver', driverController.updateDriverDetails);
 router.put('/:id/kyc-documents', upload.fields(docFields), driverController.uploadKYCDocuments);
-// Notice: removed /kyc-selfie as it's included in kyc-documents above
+router.put('/:id/kyc-selfie', upload.fields([{ name: 'selfie', maxCount: 1 }, { name: 'doc_selfie', maxCount: 1 }]), driverController.uploadSelfie);
 router.put('/:id/kyc-submit', driverController.submitKYC);
 
 // Admin KYC routes

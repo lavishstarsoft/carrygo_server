@@ -684,6 +684,46 @@ const addVehicle = async (req, res) => {
     }
 };
 
+// Selfie Upload compatibility endpoint
+const uploadSelfie = async (req, res) => {
+    const { id } = req.params;
+    try {
+        const publicDomain = process.env.R2_PUBLIC_DOMAIN || 'https://pub-c5bb8646137a4466b52b250a41f3fa75.r2.dev';
+        let selfieKey = null;
+
+        if (req.file) {
+            selfieKey = req.file.key;
+        } else if (req.files) {
+            if (req.files['selfie'] && req.files['selfie'][0]) {
+                selfieKey = req.files['selfie'][0].key;
+            } else if (req.files['doc_selfie'] && req.files['doc_selfie'][0]) {
+                selfieKey = req.files['doc_selfie'][0].key;
+            }
+        }
+
+        if (!selfieKey) {
+            return res.status(400).json({ error: 'No selfie file uploaded' });
+        }
+
+        const selfieUrl = `${publicDomain}/${selfieKey}`;
+        const driver = await Driver.findByIdAndUpdate(
+            id,
+            { selfie: selfieUrl },
+            { new: true }
+        );
+
+        if (!driver) {
+            return res.status(404).json({ error: 'Driver not found' });
+        }
+
+        console.log(`[KYC Upload] Selfie uploaded for ${id}: ${selfieKey}`);
+        return res.status(200).json(driver);
+    } catch (error) {
+        console.error('[Selfie Upload] Error:', error.message);
+        return res.status(500).json({ error: error.message });
+    }
+};
+
 module.exports = {
     getAllDrivers,
     getDriverById,
@@ -704,5 +744,7 @@ module.exports = {
     blockDriver,
     unblockDriver,
     resetToPending,
-    addVehicle
+    addVehicle,
+    uploadSelfie
 };
+
