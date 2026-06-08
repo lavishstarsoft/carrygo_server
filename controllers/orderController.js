@@ -354,8 +354,10 @@ const findNearbyDrivers = async (lat, lng, vehicle_type, radiusKm = 10) => {
             is_on_trip: { $ne: true },
             is_blocked: { $ne: true },
             kyc_status: { $regex: /approved/i },
-            vehicle_type: { $regex: new RegExp(`^${vehicle_type}$`, 'i') }
         };
+        if (vehicle_type) {
+            statusFilter.vehicle_type = { $regex: new RegExp(`^${vehicle_type}$`, 'i') };
+        }
 
         console.log(`📍 [findNearbyDrivers] Searching Redis for Origin: ${lat}, ${lng} (Radius: ${radiusKm}km)`);
 

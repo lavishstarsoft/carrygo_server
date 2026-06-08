@@ -118,8 +118,13 @@ class Query {
                 query = query.ilike(col, pattern);
             } else if (val && val.$in) {
                 query = query.in(col, val.$in.map(String));
-            } else if (val && val.$ne) {
-                query = query.neq(col, val.$ne);
+            } else if (val && val.$ne !== undefined) {
+                // NULL must count as "not true" for nullable boolean flags
+                if (val.$ne === true && ['is_on_trip', 'is_blocked'].includes(col)) {
+                    query = query.or(`${col}.eq.false,${col}.is.null`);
+                } else {
+                    query = query.neq(col, val.$ne);
+                }
             } else if (val && val.$gt) {
                 query = query.gt(col, val.$gt instanceof Date ? val.$gt.toISOString() : val.$gt);
             } else if (val === null) {
@@ -310,8 +315,8 @@ function createModel(table, hooks = {}) {
             if (hooks.preSave) await hooks.preSave(draft);
             const row = toRow(draft.toObject());
             row.id = id;
-            row.created_at = now.toISOString();
-            row.updated_at = now.toISOString();
+            if (!row.created_at) row.created_at = now.toISOString();
+            if (table !== 'otps') row.updated_at = now.toISOString();
             const supabase = getSupabaseAdmin();
             const { data: inserted, error } = await supabase.from(table).insert(row).select().single();
             if (error) throw new Error(`[${table}] create: ${error.message}`);
