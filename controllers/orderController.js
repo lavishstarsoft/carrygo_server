@@ -12,7 +12,27 @@ const OFFER_TTL_MS = parseInt(process.env.DRIVER_OFFER_TTL_MS || '15000', 10); /
 const emitOfferToDriver = async (io, driverId, payload) => {
     if (!io) return;
     io.to(`driver_${driverId}`).emit('new_order', payload);
+
+    try {
+        const { sendPushNotification } = require('../services/pushNotification');
+        const pickupAddr = payload.pickup?.address || 'Nearby';
+        const fare = payload.driver_earnings || payload.fare_total || 0;
+
+        await sendPushNotification(
+            driverId.toString(),
+            'Driver',
+            'New Delivery Request 🔔',
+            `Pickup: ${pickupAddr}. Fare: ₹${fare}`,
+            {
+                type: 'new_order',
+                orderId: payload.order_id?.toString()
+            }
+        );
+    } catch (err) {
+        console.error('[emitOfferToDriver] Error sending push notification:', err);
+    }
 };
+
 
 const emitUserSearchingAgain = (io, userId, orderId) => {
     if (!io) return;
