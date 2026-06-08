@@ -266,8 +266,13 @@ function applyOperators(target, update) {
             target[k] = (target[k] || 0) + v;
         }
     }
-    const hasOps = update.$set || update.$push || update.$inc;
-    if (!hasOps) Object.assign(target, update);
+    // Apply any plain (non-operator) top-level fields too. This must run even when
+    // operators like $inc/$set/$push are present, otherwise mixed updates such as
+    // { is_on_trip: false, $inc: { total_deliveries: 1 } } silently drop the plain fields.
+    for (const [k, v] of Object.entries(update)) {
+        if (k.startsWith('$') || k === '_vehicleId') continue;
+        setNested(target, k, v);
+    }
     return target;
 }
 
