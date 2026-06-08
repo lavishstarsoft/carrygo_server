@@ -1059,9 +1059,48 @@ const getRoute = async (req, res) => {
             distance_km: dirResult.distance_km,
             duration_min: dirResult.duration_min,
         });
+// ─── DELETE ORDER (Admin Only, Password Protected) ────────────
+const deleteOrder = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const password = req.body.password || req.headers['x-delete-password'] || req.query.password;
+
+        const correctPassword = process.env.DELETE_ORDER_PASSWORD;
+        if (!correctPassword) {
+            return res.status(500).json({ error: 'Database delete authorization password is not configured on the server.' });
+        }
+
+        if (password !== correctPassword) {
+            return res.status(401).json({ error: 'Unauthorized: Invalid delete password' });
+        }
+
+        const order = await Order.findById(id);
+        if (!order) return res.status(404).json({ error: 'Order not found' });
+
+        // Free up driver if they were assigned and the trip was active
+        if (order.driver_id && ['accepted', 'driver_arrived', 'picked_up', 'in_transit'].includes(order.status)) {
+            await Driver.findByIdAndUpdate(order.driver_id, {
+                is_on_trip: false,
+                current_order_id: null,
+            });
+        }
+
+        // Permanently delete order
+        await Order.findByIdAndDelete(id);
+
+        // Real-time update to update any active admin UI
+        const io = req.app.get('io');
+        if (io) {
+            io.emit('order_status_change', {
+                order_id: id,
+                status: 'deleted',
+            });
+        }
+
+        return res.status(200).json({ success: true, message: 'Order permanently deleted' });
     } catch (error) {
-        console.error('[Order] getRoute Error:', error.message);
-        return res.status(500).json({ success: false, error: error.message });
+        console.error('[Order] Delete Error:', error.message);
+        return res.status(500).json({ error: error.message });
     }
 };
 
@@ -1082,4 +1121,5 @@ module.exports = {
     getNearbyDriversForMap,
     getPendingOrdersForDriver,
     getRoute,
+    deleteOrder,
 };
