@@ -7,7 +7,7 @@ const Pricing = require('../models/Pricing');
 const { redis } = require('../config/redis');
 
 // ─── Dispatch Helpers (Rapido-style one-by-one) ──────────────────────────
-const OFFER_TTL_MS = parseInt(process.env.DRIVER_OFFER_TTL_MS || '15000', 10); // 15s per driver
+const OFFER_TTL_MS = parseInt(process.env.DRIVER_OFFER_TTL_MS || '30000', 10); // 30s per driver
 
 const offerExpiresMs = (value) => {
     if (!value) return 0;
