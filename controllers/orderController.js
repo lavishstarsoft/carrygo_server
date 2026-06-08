@@ -1059,6 +1059,12 @@ const getRoute = async (req, res) => {
             distance_km: dirResult.distance_km,
             duration_min: dirResult.duration_min,
         });
+    } catch (error) {
+        console.error('[Order] getRoute Error:', error.message);
+        return res.status(500).json({ success: false, error: error.message });
+    }
+};
+
 // ─── DELETE ORDER (Admin Only, Password Protected) ────────────
 const deleteOrder = async (req, res) => {
     try {
