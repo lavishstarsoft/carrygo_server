@@ -47,6 +47,9 @@ const orderFromRow = (row) => {
     if (Array.isArray(doc.dispatch_candidate_driver_ids)) {
         doc.dispatch_candidate_driver_ids = doc.dispatch_candidate_driver_ids.map(String);
     }
+    if (doc.offer_expires_at) doc.offer_expires_at = toDate(doc.offer_expires_at);
+    if (doc.cancelled_at) doc.cancelled_at = toDate(doc.cancelled_at);
+    if (doc.scheduled_at) doc.scheduled_at = toDate(doc.scheduled_at);
     return doc;
 };
 

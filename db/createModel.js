@@ -124,6 +124,8 @@ class Query {
                 query = query.gt(col, val.$gt instanceof Date ? val.$gt.toISOString() : val.$gt);
             } else if (val === null) {
                 query = query.is(col, null);
+            } else if (key === 'location' && val && val.$nearSphere) {
+                continue;
             } else if (key.includes('.')) {
                 continue;
             } else {

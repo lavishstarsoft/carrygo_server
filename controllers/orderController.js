@@ -9,6 +9,12 @@ const { redis } = require('../config/redis');
 // ─── Dispatch Helpers (Rapido-style one-by-one) ──────────────────────────
 const OFFER_TTL_MS = parseInt(process.env.DRIVER_OFFER_TTL_MS || '15000', 10); // 15s per driver
 
+const offerExpiresMs = (value) => {
+    if (!value) return 0;
+    const ms = value instanceof Date ? value.getTime() : new Date(value).getTime();
+    return Number.isNaN(ms) ? 0 : ms;
+};
+
 const emitOfferToDriver = async (io, driverId, payload) => {
     if (!io) return;
     io.to(`driver_${driverId}`).emit('new_order', payload);
@@ -98,26 +104,30 @@ const dispatchNextDriver = async (orderId, io, reasonNote = '') => {
 
         // Timeout handler: if not accepted in time, reject and move to next
         setTimeout(async () => {
-            const fresh = await Order.findById(orderId);
-            if (!fresh) return;
-            if (fresh.status !== 'searching') return;
-            if (!fresh.offered_driver_id) return;
-            if (String(fresh.offered_driver_id) !== candidateId) return;
-            if (fresh.offer_attempt !== attempt) return;
-            if (fresh.offer_expires_at && fresh.offer_expires_at.getTime() > Date.now()) return;
+            try {
+                const fresh = await Order.findById(orderId);
+                if (!fresh) return;
+                if (fresh.status !== 'searching') return;
+                if (!fresh.offered_driver_id) return;
+                if (String(fresh.offered_driver_id) !== candidateId) return;
+                if (fresh.offer_attempt !== attempt) return;
+                if (offerExpiresMs(fresh.offer_expires_at) > Date.now()) return;
 
-            if (!fresh.rejected_drivers?.map(String).includes(candidateId)) {
-                fresh.rejected_drivers.push(candidateId);
+                if (!fresh.rejected_drivers?.map(String).includes(candidateId)) {
+                    fresh.rejected_drivers.push(candidateId);
+                }
+                fresh.offered_driver_id = undefined;
+                fresh.offer_expires_at = undefined;
+                fresh.timeline.push({
+                    status: 'searching',
+                    timestamp: new Date(),
+                    note: `Driver offer timed out (${candidateId}). Trying next driver.`,
+                });
+                await fresh.save();
+                await dispatchNextDriver(orderId, io, 'Previous driver timed out.');
+            } catch (err) {
+                console.error('[dispatchNextDriver] Offer timeout handler error:', err.message);
             }
-            fresh.offered_driver_id = undefined;
-            fresh.offer_expires_at = undefined;
-            fresh.timeline.push({
-                status: 'searching',
-                timestamp: new Date(),
-                note: `Driver offer timed out (${candidateId}). Trying next driver.`,
-            });
-            await fresh.save();
-            await dispatchNextDriver(orderId, io, 'Previous driver timed out.');
         }, OFFER_TTL_MS + 500);
 
         return;
@@ -501,7 +511,7 @@ const acceptOrder = async (req, res) => {
         if (!order.offered_driver_id || String(order.offered_driver_id) !== String(driver_id)) {
             return res.status(400).json({ error: 'This order is not offered to you' });
         }
-        if (!order.offer_expires_at || order.offer_expires_at.getTime() <= Date.now()) {
+        if (!order.offer_expires_at || offerExpiresMs(order.offer_expires_at) <= Date.now()) {
             return res.status(400).json({ error: 'Offer expired' });
         }
 
