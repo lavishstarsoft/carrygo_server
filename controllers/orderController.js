@@ -809,10 +809,15 @@ const cancelOrder = async (req, res) => {
             return res.status(400).json({ error: 'Cannot cancel this order' });
         }
 
+        const offeredDriverId = order.offered_driver_id ? String(order.offered_driver_id) : null;
+        const assignedDriverId = order.driver_id ? String(order.driver_id) : null;
+
         order.status = 'cancelled';
         order.cancelled_by = 'user';
         order.cancellation_reason = reason || 'Cancelled by user';
         order.cancelled_at = new Date();
+        order.offered_driver_id = undefined;
+        order.offer_expires_at = undefined;
         order.timeline.push({
             status: 'cancelled',
             timestamp: new Date(),
@@ -820,23 +825,25 @@ const cancelOrder = async (req, res) => {
         });
         await order.save();
 
-        // Free up driver
-        if (order.driver_id) {
-            await Driver.findByIdAndUpdate(order.driver_id, {
+        // Free up assigned driver (after accept)
+        if (assignedDriverId) {
+            await Driver.findByIdAndUpdate(assignedDriverId, {
                 is_on_trip: false,
                 current_order_id: null,
             });
+        }
 
-            const io = req.app.get('io');
-            if (io) {
-                io.emit(`order_cancelled_${order.driver_id}`, {
+        const io = req.app.get('io');
+        const driversToNotify = [...new Set([offeredDriverId, assignedDriverId].filter(Boolean))];
+        if (io && driversToNotify.length > 0) {
+            for (const driverId of driversToNotify) {
+                io.to(`driver_${driverId}`).emit(`order_cancelled_${driverId}`, {
                     order_id: order._id,
                     reason: order.cancellation_reason,
                 });
             }
         }
 
-        const io = req.app.get('io');
         if (io) {
             io.emit('order_status_change', {
                 order_id: order._id,
