@@ -1016,50 +1016,100 @@ const getUserActiveOrder = async (req, res) => {
     }
 };
 
+// ─── Driver earnings helpers ───────────────────────────────────────────────
+const IST_TZ = 'Asia/Kolkata';
+
+const toPlainOrder = (order) => (order?.toObject ? order.toObject() : order);
+
+const parseFare = (fare) => {
+    if (!fare) return {};
+    if (typeof fare === 'string') {
+        try { return JSON.parse(fare); } catch { return {}; }
+    }
+    return fare;
+};
+
+const getOrderDriverEarnings = (order) => {
+    const plain = toPlainOrder(order);
+    const fare = parseFare(plain?.fare);
+    const amount = fare.driver_earnings ?? fare.total ?? 0;
+    return Math.round(Number(amount) * 100) / 100 || 0;
+};
+
+const getISTDateParts = (date = new Date()) => {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: IST_TZ,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+    }).formatToParts(date);
+    const get = (type) => parts.find((p) => p.type === type)?.value || '0';
+    return {
+        year: Number(get('year')),
+        month: Number(get('month')),
+        day: Number(get('day')),
+    };
+};
+
+const isOrderInPeriod = (order, period) => {
+    if (!period) return true;
+    const plain = toPlainOrder(order);
+    const deliveredAt = new Date(plain.updatedAt || plain.createdAt);
+    if (Number.isNaN(deliveredAt.getTime())) return false;
+
+    const delivered = getISTDateParts(deliveredAt);
+    const now = getISTDateParts(new Date());
+
+    if (period === 'today') {
+        return delivered.year === now.year
+            && delivered.month === now.month
+            && delivered.day === now.day;
+    }
+    if (period === 'week') {
+        const weekAgo = new Date();
+        weekAgo.setDate(weekAgo.getDate() - 7);
+        return deliveredAt >= weekAgo;
+    }
+    if (period === 'month') {
+        return delivered.year === now.year && delivered.month === now.month;
+    }
+    return true;
+};
+
 // GET driver earnings summary
 const getDriverEarnings = async (req, res) => {
     try {
-        const driver_id = req.driver.id;
+        const driver_id = String(req.driver.id);
         const { period } = req.query; // 'today', 'week', 'month'
 
-        let dateFilter = {};
-        const now = new Date();
-
-        // Use updatedAt (delivery time) so completed trips count in the correct period
-        if (period === 'today') {
-            dateFilter = {
-                updatedAt: {
-                    $gte: new Date(now.getFullYear(), now.getMonth(), now.getDate()),
-                },
-            };
-        } else if (period === 'week') {
-            const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-            dateFilter = { updatedAt: { $gte: weekAgo } };
-        } else if (period === 'month') {
-            dateFilter = {
-                updatedAt: {
-                    $gte: new Date(now.getFullYear(), now.getMonth(), 1),
-                },
-            };
-        }
-
-        const completedOrders = await Order.find({
+        const allDelivered = await Order.find({
             driver_id,
             status: 'delivered',
-            ...dateFilter,
-        }).sort({ createdAt: -1 });
+        }).sort({ updatedAt: -1 });
 
-        const totalEarnings = completedOrders.reduce((sum, o) => sum + (o.fare.driver_earnings || 0), 0);
-        const totalTrips = completedOrders.length;
-        const totalDistance = completedOrders.reduce((sum, o) => sum + (o.distance_km || 0), 0);
+        const orders = (Array.isArray(allDelivered) ? allDelivered : [])
+            .filter((o) => isOrderInPeriod(o, period));
+
+        const totalEarnings = orders.reduce((sum, o) => sum + getOrderDriverEarnings(o), 0);
+        const totalTrips = orders.length;
+        const totalDistance = orders.reduce((sum, o) => {
+            const plain = toPlainOrder(o);
+            return sum + (Number(plain.distance_km) || 0);
+        }, 0);
+
+        const driver = await Driver.findById(driver_id).select('total_earnings total_deliveries average_rating');
 
         return res.status(200).json({
-            total_earnings: totalEarnings,
+            total_earnings: Math.round(totalEarnings * 100) / 100,
             total_trips: totalTrips,
             total_distance_km: Math.round(totalDistance * 10) / 10,
-            orders: completedOrders,
+            lifetime_earnings: Number(driver?.total_earnings) || 0,
+            lifetime_trips: Number(driver?.total_deliveries) || 0,
+            average_rating: driver?.average_rating ?? 5,
+            orders: orders.map(toPlainOrder),
         });
     } catch (error) {
+        console.error('[getDriverEarnings] Error:', error);
         return res.status(500).json({ error: error.message });
     }
 };
