@@ -1025,18 +1025,19 @@ const getDriverEarnings = async (req, res) => {
         let dateFilter = {};
         const now = new Date();
 
+        // Use updatedAt (delivery time) so completed trips count in the correct period
         if (period === 'today') {
             dateFilter = {
-                createdAt: {
+                updatedAt: {
                     $gte: new Date(now.getFullYear(), now.getMonth(), now.getDate()),
                 },
             };
         } else if (period === 'week') {
             const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-            dateFilter = { createdAt: { $gte: weekAgo } };
+            dateFilter = { updatedAt: { $gte: weekAgo } };
         } else if (period === 'month') {
             dateFilter = {
-                createdAt: {
+                updatedAt: {
                     $gte: new Date(now.getFullYear(), now.getMonth(), 1),
                 },
             };

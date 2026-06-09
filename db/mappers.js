@@ -24,6 +24,10 @@ const userFromRow = (row) => {
 const driverFromRow = (row) => {
     const doc = baseFromRow(row);
     if (!doc) return null;
+    // Ensure GeoJSON location exists for map display (Supabase may have lat/lng columns only)
+    if ((!doc.location || !doc.location.coordinates) && doc.latitude != null && doc.longitude != null) {
+        doc.location = { type: 'Point', coordinates: [Number(doc.longitude), Number(doc.latitude)] };
+    }
     if (doc.current_order_id) doc.current_order_id = doc.current_order_id;
     if (Array.isArray(doc.vehicles)) {
         doc.vehicles = doc.vehicles.map((v) => ({

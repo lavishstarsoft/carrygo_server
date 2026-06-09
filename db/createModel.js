@@ -109,8 +109,20 @@ class Query {
 
     buildFilteredQuery(query) {
         const f = this._mongoFilter;
+        const colMap = {
+            _id: 'id',
+            createdAt: 'created_at',
+            updatedAt: 'updated_at',
+            isActive: 'is_active',
+            relatedId: 'related_id',
+            onModel: 'on_model',
+            isRead: 'is_read',
+            delivery_zone: 'delivery_zone_id',
+            driver_id: 'driver_id',
+            user_id: 'user_id',
+        };
         for (const [key, val] of Object.entries(f)) {
-            const col = key === '_id' ? 'id' : key === 'isActive' ? 'is_active' : key === 'relatedId' ? 'related_id' : key === 'onModel' ? 'on_model' : key === 'isRead' ? 'is_read' : key === 'delivery_zone' ? 'delivery_zone_id' : key;
+            const col = colMap[key] || key;
 
             if (val && val.$regex) {
                 let pattern = val.$regex.source || String(val);
@@ -127,6 +139,10 @@ class Query {
                 }
             } else if (val && val.$gt) {
                 query = query.gt(col, val.$gt instanceof Date ? val.$gt.toISOString() : val.$gt);
+            } else if (val && val.$gte) {
+                query = query.gte(col, val.$gte instanceof Date ? val.$gte.toISOString() : val.$gte);
+            } else if (val && val.$lte) {
+                query = query.lte(col, val.$lte instanceof Date ? val.$lte.toISOString() : val.$lte);
             } else if (val === null) {
                 query = query.is(col, null);
             } else if (key === 'location' && val && val.$nearSphere) {
