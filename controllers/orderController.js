@@ -15,9 +15,51 @@ const offerExpiresMs = (value) => {
     return Number.isNaN(ms) ? 0 : ms;
 };
 
+const haversineKm = (lat1, lng1, lat2, lng2) => {
+    const R = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) ** 2
+        + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+
+const getDriverLatLng = (driver) => {
+    const coords = driver?.location?.coordinates;
+    if (Array.isArray(coords) && coords.length >= 2) {
+        return { lat: Number(coords[1]), lng: Number(coords[0]) };
+    }
+    if (driver?.latitude != null && driver?.longitude != null) {
+        return { lat: Number(driver.latitude), lng: Number(driver.longitude) };
+    }
+    return null;
+};
+
+const rankDriversByDistance = (drivers, originLat, originLng) => {
+    return drivers
+        .map((driver) => {
+            const pos = getDriverLatLng(driver);
+            if (!pos || isNaN(pos.lat) || isNaN(pos.lng)) return null;
+            return {
+                driver,
+                distanceKm: haversineKm(originLat, originLng, pos.lat, pos.lng),
+            };
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.distanceKm - b.distanceKm)
+        .map((entry) => entry.driver);
+};
+
 const emitOfferToDriver = async (io, driverId, payload) => {
     if (!io) return;
-    io.to(`driver_${driverId}`).emit('new_order', payload);
+    const id = String(driverId);
+    const enriched = {
+        ...payload,
+        order_id: String(payload.order_id),
+    };
+
+    io.to(`driver_${id}`).emit('new_order', enriched);
+    io.emit(`new_order_${id}`, enriched);
 
     try {
         const { sendPushNotification } = require('../services/pushNotification');
@@ -25,13 +67,13 @@ const emitOfferToDriver = async (io, driverId, payload) => {
         const fare = payload.driver_earnings || payload.fare_total || 0;
 
         await sendPushNotification(
-            driverId.toString(),
+            id,
             'Driver',
             'New Delivery Request 🔔',
             `Pickup: ${pickupAddr}. Fare: ₹${fare}`,
             {
                 type: 'new_order',
-                orderId: payload.order_id?.toString()
+                orderId: enriched.order_id,
             }
         );
     } catch (err) {
@@ -39,6 +81,43 @@ const emitOfferToDriver = async (io, driverId, payload) => {
     }
 };
 
+
+const resolveDriverId = (value) => {
+    if (!value) return null;
+    if (typeof value === 'object') {
+        return String(value._id || value.id || '');
+    }
+    return String(value);
+};
+
+const notifyDriverOrderCancelled = async (io, driverId, payload) => {
+    if (!driverId) return;
+    const id = String(driverId);
+    const eventName = `order_cancelled_${id}`;
+    const data = {
+        order_id: String(payload.order_id),
+        reason: payload.reason || 'Trip cancelled',
+        cancelled_by: payload.cancelled_by || 'user',
+    };
+
+    if (io) {
+        io.to(`driver_${id}`).emit(eventName, data);
+        io.emit(eventName, data);
+    }
+
+    try {
+        const { sendPushNotification } = require('../services/pushNotification');
+        await sendPushNotification(
+            id,
+            'Driver',
+            'Trip Cancelled',
+            data.reason,
+            { type: 'order_cancelled', orderId: data.order_id },
+        );
+    } catch (err) {
+        console.error('[notifyDriverOrderCancelled] Push failed:', err.message);
+    }
+};
 
 const emitUserSearchingAgain = (io, userId, orderId) => {
     if (!io) return;
@@ -320,11 +399,15 @@ const createBooking = async (req, res) => {
                     await checkOrder.save();
 
                     if (io) {
-                        io.emit(`order_update_${checkOrder.user_id}`, {
-                            order_id: checkOrder._id,
-                            status: 'cancelled',
-                            reason: 'No drivers available',
-                        });
+                        const userId = checkOrder.user_id?._id || checkOrder.user_id;
+                        if (userId) {
+                            io.to(`user_${userId}`).emit('order_update', {
+                                order_id: checkOrder._id,
+                                status: 'cancelled',
+                                cancelled_by: 'system',
+                                cancellation_reason: 'No drivers available',
+                            });
+                        }
                     }
                 }
             } catch (err) {
@@ -373,48 +456,50 @@ const findNearbyDrivers = async (lat, lng, vehicle_type, radiusKm = 10) => {
 
         if (nearbyDriverIds.length > 0) {
             console.log(`✅ [findNearbyDrivers] Redis found ${nearbyDriverIds.length} candidate IDs.`);
-            drivers = await Driver.find({
-                _id: { $in: nearbyDriverIds },
-                ...statusFilter
+            const redisDrivers = await Driver.find({
+                _id: { $in: nearbyDriverIds.map(String) },
+                ...statusFilter,
             })
-            .limit(10)
-            .select('_id name phone vehicle_type vehicle_number location average_rating fcm_token');
+                .limit(20)
+                .select('_id name phone vehicle_type vehicle_number location latitude longitude average_rating fcm_token is_active kyc_status');
+
+            const orderMap = new Map(redisDrivers.map((d) => [String(d._id), d]));
+            drivers = nearbyDriverIds
+                .map((id) => orderMap.get(String(id)))
+                .filter(Boolean);
 
             if (drivers.length === 0) {
                 console.log(`⚠️ [findNearbyDrivers] ${nearbyDriverIds.length} Redis candidates did not pass filters (online/KYC/vehicle_type).`);
             }
         }
 
-        // Priority 2: MongoDB Geospatial Fallback (If Redis returned no matches or is offline)
+        // Priority 2: DB fallback — rank all eligible online drivers by distance
         if (drivers.length === 0) {
-            console.log('⚠️ [findNearbyDrivers] Falling back to MongoDB geospatial search...');
-            drivers = await Driver.find({
-                ...statusFilter,
-                location: {
-                    $nearSphere: {
-                        $geometry: {
-                            type: 'Point',
-                            coordinates: [parseFloat(lng), parseFloat(lat)],
-                        },
-                        $maxDistance: radiusKm * 1000, 
-                    },
-                },
-            })
-            .limit(10)
-            .select('_id name phone vehicle_type vehicle_number location average_rating fcm_token');
+            console.log('⚠️ [findNearbyDrivers] Falling back to distance-ranked driver search...');
+            const eligible = await Driver.find(statusFilter)
+                .limit(50)
+                .select('_id name phone vehicle_type vehicle_number location latitude longitude average_rating fcm_token is_active kyc_status');
+
+            drivers = rankDriversByDistance(eligible, parseFloat(lat), parseFloat(lng))
+                .filter((driver) => {
+                    const pos = getDriverLatLng(driver);
+                    if (!pos) return false;
+                    return haversineKm(parseFloat(lat), parseFloat(lng), pos.lat, pos.lng) <= radiusKm;
+                });
         }
 
-        // FALLBACK: If still no drivers found nearby, try finding any active matching driver in the whole system
+        // Priority 3: any matching online driver (testing / sparse areas)
         if (drivers.length === 0) {
-            console.log('ℹ️ [findNearbyDrivers] No nearby drivers found. Checking system-wide matching...');
+            console.log('ℹ️ [findNearbyDrivers] No nearby drivers found. Using system-wide matching...');
             const fallbackDrivers = await Driver.find(statusFilter)
-                .limit(5)
-                .select('_id name phone vehicle_type vehicle_number location average_rating fcm_token');
-            
-            return fallbackDrivers.map(d => ({ ...d.toObject(), is_fallback: true }));
+                .limit(20)
+                .select('_id name phone vehicle_type vehicle_number location latitude longitude average_rating fcm_token');
+
+            const ranked = rankDriversByDistance(fallbackDrivers, parseFloat(lat), parseFloat(lng));
+            return ranked.slice(0, 5).map((d) => ({ ...d.toObject(), is_fallback: true }));
         }
 
-        return drivers.map(d => d.toObject());
+        return drivers.slice(0, 10).map((d) => d.toObject());
     } catch (error) {
         console.error('❌ [findNearbyDrivers] Fatal error:', error.message);
         return [];
@@ -447,52 +532,27 @@ const getPendingOrdersForDriver = async (req, res) => {
 
     try {
         const driver = await Driver.findById(driver_id);
-        if (!driver || !driver.location || !driver.location.coordinates) {
-            return res.status(400).json({ error: 'Driver location missing' });
+        if (!driver) {
+            return res.status(404).json({ error: 'Driver not found' });
         }
 
-        const [lng, lat] = driver.location.coordinates;
         const vehicle_type = driver.vehicle_type;
 
         // Rapido-style: driver should only see orders currently offered to them.
         const now = new Date();
-        const possibleOrders = await Order.find({
+        const pendingFilter = {
             status: 'searching',
-            offered_driver_id: driver_id,
+            offered_driver_id: String(driver_id),
             offer_expires_at: { $gt: now },
-            vehicle_type: { $regex: new RegExp(`^${vehicle_type}$`, 'i') },
-        }).sort({ createdAt: 1 });
-
-        // Simple Haversine distance calc (optional safeguard) to filter those within 10km radius
-        let selectedOrder = null;
-        for (const o of possibleOrders) {
-            if (o.pickup && o.pickup.lat && o.pickup.lng) {
-                const pLat = o.pickup.lat;
-                const pLng = o.pickup.lng;
-                
-                // Haversine formula
-                const R = 6371; // km
-                const dLat = (pLat - lat) * Math.PI / 180;
-                const dLon = (pLng - lng) * Math.PI / 180;
-                const a = 
-                    Math.sin(dLat / 2) * Math.sin(dLat/2) +
-                    Math.cos(lat * Math.PI / 180) * Math.cos(pLat * Math.PI / 180) * 
-                    Math.sin(dLon/2) * Math.sin(dLon/2);
-                const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-                const distance = R * c;
-
-                if (distance <= 10) {
-                    selectedOrder = o;
-                    break;
-                }
-            }
+        };
+        if (vehicle_type) {
+            pendingFilter.vehicle_type = { $regex: new RegExp(`^${vehicle_type}$`, 'i') };
         }
+        const possibleOrders = await Order.find(pendingFilter).sort({ createdAt: 1 });
 
-        if (selectedOrder) {
-            return res.status(200).json({ pending_order: selectedOrder });
-        } else {
-            return res.status(200).json({ pending_order: null });
-        }
+        const selectedOrder = possibleOrders[0] || null;
+
+        return res.status(200).json({ pending_order: selectedOrder });
     } catch (error) {
         console.error('[Order] getPendingOrdersForDriver Error:', error.message);
         return res.status(500).json({ error: error.message });
@@ -772,11 +832,24 @@ const updateOrderStatus = async (req, res) => {
         // Real-time notification
         const io = req.app.get('io');
         if (io) {
-            io.emit(`order_update_${order.user_id}`, {
-                order_id: order._id,
-                status: order.status,
-                delivery_otp: status === 'in_transit' ? order.delivery_otp : undefined,
-            });
+            const userId = order.user_id?._id || order.user_id;
+            const driverCancelledBeforePickup = status === 'cancelled'
+                && order.status === 'searching';
+
+            if (userId) {
+                io.to(`user_${userId}`).emit('order_update', {
+                    order_id: order._id,
+                    status: order.status,
+                    cancelled_by: driverCancelledBeforePickup ? 'driver' : undefined,
+                    cancellation_reason: driverCancelledBeforePickup
+                        ? (req.body.reason || 'Driver cancelled')
+                        : undefined,
+                    message: driverCancelledBeforePickup
+                        ? 'Your driver cancelled. Finding another driver...'
+                        : undefined,
+                    delivery_otp: status === 'in_transit' ? order.delivery_otp : undefined,
+                });
+            }
 
             io.emit('order_status_change', {
                 order_id: order._id,
@@ -786,7 +859,7 @@ const updateOrderStatus = async (req, res) => {
 
             // Kick re-dispatch after save if needed
             if (order.status === 'searching' && !order.driver_id) {
-                emitUserSearchingAgain(io, order.user_id?._id || order.user_id, order._id);
+                emitUserSearchingAgain(io, userId, order._id);
                 await dispatchNextDriver(order._id, io, 'Re-dispatch after driver cancel.');
             }
         }
@@ -812,8 +885,8 @@ const cancelOrder = async (req, res) => {
             return res.status(400).json({ error: 'Cannot cancel this order' });
         }
 
-        const offeredDriverId = order.offered_driver_id ? String(order.offered_driver_id) : null;
-        const assignedDriverId = order.driver_id ? String(order.driver_id) : null;
+        const offeredDriverId = resolveDriverId(order.offered_driver_id);
+        const assignedDriverId = resolveDriverId(order.driver_id);
 
         order.status = 'cancelled';
         order.cancelled_by = 'user';
@@ -838,16 +911,24 @@ const cancelOrder = async (req, res) => {
 
         const io = req.app.get('io');
         const driversToNotify = [...new Set([offeredDriverId, assignedDriverId].filter(Boolean))];
-        if (io && driversToNotify.length > 0) {
-            for (const driverId of driversToNotify) {
-                io.to(`driver_${driverId}`).emit(`order_cancelled_${driverId}`, {
-                    order_id: order._id,
-                    reason: order.cancellation_reason,
-                });
-            }
+        for (const driverId of driversToNotify) {
+            await notifyDriverOrderCancelled(io, driverId, {
+                order_id: order._id,
+                reason: order.cancellation_reason || 'The customer cancelled this trip.',
+                cancelled_by: 'user',
+            });
         }
 
         if (io) {
+            const userId = order.user_id?._id || order.user_id;
+            if (userId) {
+                io.to(`user_${userId}`).emit('order_update', {
+                    order_id: order._id,
+                    status: 'cancelled',
+                    cancelled_by: 'user',
+                    cancellation_reason: order.cancellation_reason,
+                });
+            }
             io.emit('order_status_change', {
                 order_id: order._id,
                 order_number: order.order_number,

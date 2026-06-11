@@ -3,6 +3,32 @@ const Notification = require('../models/Notification');
 const path = require('path');
 const { redis } = require('../config/redis');
 
+const syncDriverGeoIndex = async (driver) => {
+    if (!driver?._id) return;
+    const id = String(driver._id);
+    const coords = driver.location?.coordinates;
+    const latitude = coords?.[1] ?? driver.latitude;
+    const longitude = coords?.[0] ?? driver.longitude;
+
+    const canIndex = driver.is_active
+        && !driver.is_on_trip
+        && !driver.is_blocked
+        && /approved/i.test(driver.kyc_status || '')
+        && latitude != null
+        && longitude != null;
+
+    try {
+        if (canIndex) {
+            await redis.geoadd('drivers_locations', Number(longitude), Number(latitude), id);
+            console.log(`📍 [Redis] Indexed driver ${id} at ${latitude},${longitude}`);
+        } else {
+            await redis.zrem('drivers_locations', id);
+        }
+    } catch (redisErr) {
+        console.error('❌ [Redis GEO sync Error]:', redisErr.message);
+    }
+};
+
 const getAllDrivers = async (req, res) => {
     try {
         const data = await Driver.find({});
@@ -33,10 +59,14 @@ const updateDriver = async (req, res) => {
         if (!data) {
             return res.status(404).json({ error: 'Driver not found' });
         }
-        
+
+        if (Object.prototype.hasOwnProperty.call(req.body, 'is_active')) {
+            await syncDriverGeoIndex(data);
+        }
+
         const io = req.app.get('io');
         if (io) io.emit('fleet_updated', data);
-        
+
         return res.status(200).json(data);
     } catch (error) {
         return res.status(500).json({ error: error.message });
@@ -93,21 +123,7 @@ const updateDriverLocation = async (req, res) => {
             return res.status(404).json({ error: 'Driver not found' });
         }
 
-        // --- SCALE SYNC: Update Redis Geolocation Index ---
-        // We only index drivers who are active and not on a trip for better efficiency
-        if (data.is_active && !data.is_on_trip && !data.is_blocked && data.kyc_status?.match(/approved/i)) {
-            try {
-                // Key: drivers_locations, Member: driver_id
-                await redis.geoadd('drivers_locations', longitude, latitude, id);
-            } catch (redisErr) {
-                console.error('❌ [Redis GEOADD Error]:', redisErr.message);
-            }
-        } else {
-            // Remove from index if they become unavailable
-            try {
-                await redis.zrem('drivers_locations', id);
-            } catch (redisErr) {}
-        }
+        await syncDriverGeoIndex(data);
 
         // Emit real-time location if driver is on a trip
         if (data.is_on_trip && data.current_order_id) {
