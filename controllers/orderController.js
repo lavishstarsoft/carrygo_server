@@ -8,7 +8,10 @@ const { redis } = require('../config/redis');
 const {
     releaseStaleDriverTripState,
     releaseStaleTripStateNearPickup,
+    isDriverDispatchable,
+    setDriverTripState,
 } = require('../services/driverAvailability');
+const { registerSearchingReconcile } = require('../services/productionJobs');
 
 // ─── Dispatch Helpers (Rapido-style one-by-one) ──────────────────────────
 const OFFER_TTL_MS = parseInt(process.env.DRIVER_OFFER_TTL_MS || '30000', 10); // 30s per driver
@@ -153,10 +156,9 @@ const dispatchNextDriver = async (orderId, io, reasonNote = '') => {
 
         const driver = await Driver.findById(candidateId).select('_id is_active is_on_trip current_order_id kyc_status vehicle_type vehicle_number location average_rating name phone');
         if (!driver) continue;
-        if (!driver.is_active) continue;
-        if (driver.is_on_trip || driver.current_order_id) continue;
-        if (!/approved/i.test(driver.kyc_status || '')) continue;
         if (!new RegExp(`^${order.vehicle_type}$`, 'i').test(driver.vehicle_type || '')) continue;
+        const canDispatch = await isDriverDispatchable(driver);
+        if (!canDispatch) continue;
 
         // Offer to this driver
         const attempt = (order.offer_attempt || 0) + 1;
@@ -488,12 +490,24 @@ const reconcileSearchingOrderDispatch = async (order, io) => {
         .populate('driver_id', 'name phone vehicle_type vehicle_number average_rating location');
 };
 
+const filterDispatchableDrivers = async (drivers) => {
+    const dispatchable = [];
+    for (const driver of drivers) {
+        if (await isDriverDispatchable(driver)) dispatchable.push(driver);
+    }
+    return dispatchable;
+};
+
+const mapDispatchableDrivers = async (drivers, mapper) => {
+    const dispatchable = await filterDispatchableDrivers(drivers);
+    return mapper(dispatchable);
+};
+
 // ─── FIND NEARBY DRIVERS ──────────────────────────────────────
 const findNearbyDrivers = async (lat, lng, vehicle_type, radiusKm = 10) => {
     try {
         const statusFilter = {
             is_active: true,
-            is_on_trip: { $ne: true },
             is_blocked: { $ne: true },
             kyc_status: { $regex: /approved/i },
         };
@@ -555,10 +569,12 @@ const findNearbyDrivers = async (lat, lng, vehicle_type, radiusKm = 10) => {
                 .select('_id name phone vehicle_type vehicle_number location latitude longitude average_rating fcm_token');
 
             const ranked = rankDriversByDistance(fallbackDrivers, parseFloat(lat), parseFloat(lng));
-            return ranked.slice(0, 5).map((d) => ({ ...d.toObject(), is_fallback: true }));
+            return mapDispatchableDrivers(ranked.slice(0, 5), (list) =>
+                list.map((d) => ({ ...d.toObject(), is_fallback: true }))
+            );
         }
 
-        return drivers.slice(0, 10).map((d) => d.toObject());
+        return mapDispatchableDrivers(drivers.slice(0, 10), (list) => list.map((d) => d.toObject()));
     } catch (error) {
         console.error('❌ [findNearbyDrivers] Fatal error:', error.message);
         return [];
@@ -641,10 +657,9 @@ const acceptOrder = async (req, res) => {
             return res.status(400).json({ error: 'Offer expired' });
         }
 
-        // Driver must be available (not on another trip)
-        const driverDoc = await Driver.findById(driver_id).select('is_on_trip current_order_id');
+        const driverDoc = await Driver.findById(driver_id);
         if (!driverDoc) return res.status(404).json({ error: 'Driver not found' });
-        if (driverDoc.is_on_trip || driverDoc.current_order_id) {
+        if (!(await isDriverDispatchable(driverDoc))) {
             return res.status(400).json({ error: 'Driver already on another trip' });
         }
 
@@ -666,11 +681,7 @@ const acceptOrder = async (req, res) => {
         });
         await order.save();
 
-        // Update driver status
-        await Driver.findByIdAndUpdate(driver_id, {
-            is_on_trip: true,
-            current_order_id: order._id,
-        });
+        await setDriverTripState(driver_id, { onTrip: true, orderId: order._id });
 
         // Get driver details for user notification
         const driver = await Driver.findById(driver_id).select('name phone vehicle_type vehicle_number average_rating location');
@@ -841,10 +852,8 @@ const updateOrderStatus = async (req, res) => {
             order.payment_status = order.payment_method === 'cash' ? 'completed' : order.payment_status;
             if (delivery_photo) order.delivery_photo = delivery_photo;
 
-            // Update driver stats
+            await setDriverTripState(order.driver_id, { onTrip: false });
             await Driver.findByIdAndUpdate(order.driver_id, {
-                is_on_trip: false,
-                current_order_id: null,
                 $inc: {
                     total_deliveries: 1,
                     total_earnings: order.fare.driver_earnings,
@@ -862,10 +871,7 @@ const updateOrderStatus = async (req, res) => {
             order.cancellation_reason = req.body.reason || 'Driver cancelled';
             order.cancelled_at = new Date();
 
-            await Driver.findByIdAndUpdate(order.driver_id, {
-                is_on_trip: false,
-                current_order_id: null,
-            });
+            await setDriverTripState(order.driver_id, { onTrip: false });
 
             // Rapido-style: if driver cancels before pickup, re-dispatch to next drivers
             if (['accepted', 'driver_arrived'].includes(order.status)) {
@@ -964,10 +970,7 @@ const cancelOrder = async (req, res) => {
 
         // Free up assigned driver (after accept)
         if (assignedDriverId) {
-            await Driver.findByIdAndUpdate(assignedDriverId, {
-                is_on_trip: false,
-                current_order_id: null,
-            });
+            await setDriverTripState(assignedDriverId, { onTrip: false });
         }
 
         const io = req.app.get('io');
@@ -1332,10 +1335,7 @@ const deleteOrder = async (req, res) => {
 
         // Free up driver if they were assigned and the trip was active
         if (order.driver_id && ['accepted', 'driver_arrived', 'picked_up', 'in_transit'].includes(order.status)) {
-            await Driver.findByIdAndUpdate(order.driver_id, {
-                is_on_trip: false,
-                current_order_id: null,
-            });
+            await setDriverTripState(order.driver_id, { onTrip: false });
         }
 
         // Permanently delete order
@@ -1356,6 +1356,8 @@ const deleteOrder = async (req, res) => {
         return res.status(500).json({ error: error.message });
     }
 };
+
+registerSearchingReconcile(reconcileSearchingOrderDispatch);
 
 module.exports = {
     createBooking,

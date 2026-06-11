@@ -18,6 +18,7 @@ const userAuthRoutes = require('./routes/userAuthRoutes');
 const fareRoutes = require('./routes/fareRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const connectDB = require('./config/db');
+const { startProductionJobs } = require('./services/productionJobs');
 
 // Connect Database
 connectDB();
@@ -115,4 +116,5 @@ app.get('/health', (req, res) => {
 const HOST = '0.0.0.0';
 server.listen(PORT, HOST, () => {
   console.log(`Server & Socket.io are running on http://${HOST}:${PORT}`);
+  startProductionJobs(io);
 });
