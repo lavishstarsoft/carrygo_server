@@ -273,7 +273,7 @@ const calculateFare = async (pickup, dropoff, vehicle_type, vehicle_body_type) =
     return {
         distance_km: Math.round(distance_km * 10) / 10,
         duration_min: Math.round(duration_min),
-        travel_duration_min,
+        travel_duration_min: Math.round(travel_duration_min),
         city,
         fare: {
             ...fare,
@@ -318,8 +318,8 @@ const createBooking = async (req, res) => {
             vehicle_type,
             vehicle_body_type: vehicle_body_type || '',
             distance_km: fareResult.distance_km,
-            duration_min: fareResult.duration_min,
-            estimated_travel_mins: fareResult.travel_duration_min,
+            duration_min: Math.round(Number(fareResult.duration_min) || 0),
+            estimated_travel_mins: Math.round(Number(fareResult.travel_duration_min) || 0),
             route_polyline: dirResult.success ? dirResult.polyline : '',
             fare: fareResult.fare,
             payment_method: payment_method ? payment_method.toLowerCase() : 'cash',
@@ -1356,7 +1356,7 @@ const getRoute = async (req, res) => {
             polyline: dirResult.polyline,
             coordinates: dirResult.coordinates || [],
             distance_km: dirResult.distance_km,
-            duration_min: dirResult.duration_min,
+            duration_min: Math.round(Number(dirResult.duration_min) || 0),
         });
     } catch (error) {
         console.error('[Order] getRoute Error:', error.message);

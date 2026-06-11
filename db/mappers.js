@@ -174,6 +174,9 @@ const orderToRow = (doc) => {
         'rejected_drivers','dispatch_candidate_driver_ids','dispatch_cursor','offered_driver_id',
         'offer_expires_at','offer_attempt','timeline','is_scheduled','scheduled_at','delivery_photo','city'];
     fields.forEach((f) => { if (doc[f] !== undefined) row[f] = doc[f]; });
+    ['duration_min', 'estimated_travel_mins', 'actual_wait_mins', 'offer_attempt', 'dispatch_cursor'].forEach((f) => {
+        if (row[f] != null && row[f] !== '') row[f] = Math.round(Number(row[f]) || 0);
+    });
     ['user_id','driver_id','payment_id','offered_driver_id'].forEach((f) => {
         if (row[f]) row[f] = String(row[f]);
     });
