@@ -388,13 +388,14 @@ const geocode = async (req, res) => {
  * Get address suggestions from Google Places
  */
 const autocomplete = async (req, res) => {
-    const { input, lat, lng } = req.query;
+    const { input, lat, lng, city } = req.query;
     if (!input) return res.status(400).json({ error: 'Input query is required' });
 
     try {
         const result = await getAutocompleteSuggestions(input, {
             lat: lat != null ? Number(lat) : undefined,
             lng: lng != null ? Number(lng) : undefined,
+            city: typeof city === 'string' ? city.trim() : undefined,
         });
         return res.status(200).json(result);
     } catch (error) {

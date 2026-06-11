@@ -26,6 +26,8 @@ const estimateDrivingDistance = (originLat, originLng, destLat, destLng) => {
     };
 };
 
+const LOCAL_RADIUS_KM = 45;
+
 const mapNominatimResults = (results = []) => results.map((r) => {
     const parts = (r.display_name || '').split(',').map((p) => p.trim()).filter(Boolean);
     return {
@@ -38,19 +40,78 @@ const mapNominatimResults = (results = []) => results.map((r) => {
     };
 });
 
-const nominatimSearch = async (query, { lat, lng } = {}) => {
+const buildLocalQuery = (input, city) => {
+    const trimmed = (input || '').trim();
+    if (!trimmed) return trimmed;
+    if (!city) return trimmed;
+    const cityLower = city.toLowerCase();
+    if (trimmed.toLowerCase().includes(cityLower)) return trimmed;
+    return `${trimmed}, ${city}, India`;
+};
+
+const dedupeSuggestions = (items) => {
+    const seen = new Set();
+    return items.filter((item) => {
+        const key = item.place_id || item.description;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+};
+
+const rankLocalSuggestions = (suggestions, { lat, lng, city }) => {
+    if (!suggestions.length) return [];
+
+    const cityLower = city ? city.toLowerCase() : null;
+
+    const ranked = suggestions.map((s) => {
+        let score = 0;
+        const text = `${s.description || ''} ${s.secondary_text || ''}`.toLowerCase();
+
+        if (cityLower && text.includes(cityLower)) score += 100;
+
+        if (lat != null && lng != null && s.lat != null && s.lng != null) {
+            const dist = haversineKm(lat, lng, s.lat, s.lng);
+            s.distance_km = Math.round(dist * 10) / 10;
+            if (dist <= LOCAL_RADIUS_KM) score += 80;
+            score += Math.max(0, 50 - dist);
+        } else {
+            s.distance_km = null;
+        }
+
+        return { ...s, _score: score };
+    });
+
+    const local = ranked.filter((s) => {
+        if (lat == null || lng == null || s.lat == null || s.lng == null) {
+            return cityLower ? `${s.description || ''}`.toLowerCase().includes(cityLower) : true;
+        }
+        return s.distance_km <= LOCAL_RADIUS_KM
+            || (cityLower && `${s.description || ''}`.toLowerCase().includes(cityLower));
+    });
+
+    const pool = local.length > 0 ? local : ranked;
+    return dedupeSuggestions(
+        pool.sort((a, b) => b._score - a._score),
+    )
+        .slice(0, 6)
+        .map(({ _score, ...rest }) => rest);
+};
+
+const nominatimSearch = async (query, { lat, lng, city, strict = false } = {}) => {
+    const searchQuery = buildLocalQuery(query, city);
     const params = {
-        q: query,
+        q: searchQuery,
         format: 'json',
         addressdetails: 1,
-        limit: 6,
+        limit: 10,
         countrycodes: 'in',
     };
 
     if (lat != null && lng != null) {
-        const delta = 0.35;
+        const delta = strict ? 0.1 : 0.22;
         params.viewbox = `${lng - delta},${lat + delta},${lng + delta},${lat - delta}`;
-        params.bounded = 0;
+        params.bounded = strict ? 1 : 0;
     }
 
     const response = await axios.get('https://nominatim.openstreetmap.org/search', {
@@ -263,12 +324,19 @@ const reverseGeocode = async (lat, lng) => {
  * Get address suggestions from Google Places Autocomplete API
  */
 const getAutocompleteSuggestions = async (input, options = {}) => {
-    const { lat, lng } = options;
+    let { lat, lng, city } = options;
+
+    if (lat != null && lng != null && !city) {
+        const geo = await reverseGeocode(lat, lng);
+        if (geo.success && geo.city) city = geo.city;
+    }
+
+    const biasedInput = buildLocalQuery(input, city);
 
     if (GOOGLE_MAPS_API_KEY) {
         try {
             const params = {
-                input,
+                input: biasedInput,
                 key: GOOGLE_MAPS_API_KEY,
                 components: 'country:in',
                 language: 'en',
@@ -276,27 +344,28 @@ const getAutocompleteSuggestions = async (input, options = {}) => {
 
             if (lat != null && lng != null) {
                 params.location = `${lat},${lng}`;
-                params.radius = 50000;
-                params.strictbounds = false;
+                params.radius = 30000;
+                params.strictbounds = true;
             }
 
             const response = await axios.get('https://maps.googleapis.com/maps/api/place/autocomplete/json', { params });
             const data = response.data;
 
             if (data.status === 'OK') {
-                return {
-                    success: true,
-                    suggestions: data.predictions.map(p => ({
+                const suggestions = rankLocalSuggestions(
+                    data.predictions.map(p => ({
                         description: p.description,
                         place_id: p.place_id,
                         main_text: p.structured_formatting.main_text,
                         secondary_text: p.structured_formatting.secondary_text,
                     })),
-                };
+                    { lat, lng, city },
+                );
+                return { success: true, suggestions, city: city || null };
             }
 
             if (data.status === 'ZERO_RESULTS') {
-                return { success: true, suggestions: [] };
+                return { success: true, suggestions: [], city: city || null };
             }
 
             console.warn('[GoogleMaps] Autocomplete fallback:', data.status);
@@ -306,8 +375,14 @@ const getAutocompleteSuggestions = async (input, options = {}) => {
     }
 
     try {
-        const suggestions = await nominatimSearch(input, { lat, lng });
-        return { success: true, suggestions };
+        let suggestions = await nominatimSearch(input, { lat, lng, city, strict: true });
+        if (suggestions.length < 3) {
+            const relaxed = await nominatimSearch(input, { lat, lng, city, strict: false });
+            suggestions = dedupeSuggestions([...suggestions, ...relaxed]);
+        }
+
+        suggestions = rankLocalSuggestions(suggestions, { lat, lng, city });
+        return { success: true, suggestions, city: city || null };
     } catch (error) {
         console.error('[Nominatim] Autocomplete Error:', error.message);
         return { success: false, error: error.message, suggestions: [] };
