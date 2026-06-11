@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS wallet_transactions (
     wallet_delta        NUMERIC DEFAULT 0,
     balance_after       NUMERIC DEFAULT 0,
     note                TEXT DEFAULT '',
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_wallet_tx_driver_created ON wallet_transactions (driver_id, created_at DESC);

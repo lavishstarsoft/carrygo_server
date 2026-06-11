@@ -249,7 +249,8 @@ CREATE TABLE IF NOT EXISTS wallet_transactions (
     wallet_delta        NUMERIC DEFAULT 0,
     balance_after       NUMERIC DEFAULT 0,
     note                TEXT DEFAULT '',
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_wallet_tx_driver_created ON wallet_transactions (driver_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_wallet_tx_order_unique ON wallet_transactions (order_id) WHERE order_id IS NOT NULL;
@@ -307,7 +308,7 @@ DO $$
 DECLARE
     t TEXT;
 BEGIN
-    FOREACH t IN ARRAY ARRAY['admins','settings','delivery_zones','users','drivers','pricings','orders','payments']
+    FOREACH t IN ARRAY ARRAY['admins','settings','delivery_zones','users','drivers','pricings','orders','payments','wallet_transactions']
     LOOP
         EXECUTE format('
             DROP TRIGGER IF EXISTS trg_%s_updated_at ON %I;
