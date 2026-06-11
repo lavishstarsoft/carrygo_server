@@ -77,8 +77,41 @@ const mapNominatimResults = (results = []) => results.map((r) => {
     };
 });
 
+const SEARCH_STOP_WORDS = new Set(['in', 'the', 'and', 'near', 'road', 'rd', 'st', 'at']);
+
+const normalizeSearchInput = (input = '') => input
+    .replace(/\bcollage\b/gi, 'college')
+    .replace(/\bcollag\b/gi, 'college')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const getQueryTokens = (query = '') => normalizeSearchInput(query)
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token.length > 1 && !SEARCH_STOP_WORDS.has(token));
+
+const getSearchVariants = (input, city) => {
+    const normalized = normalizeSearchInput(input);
+    if (!normalized) return [];
+
+    const variants = [normalized];
+    const words = normalized.split(/\s+/).filter(Boolean);
+    const acronyms = words.filter((word) => word.length <= 5 && /^[a-z0-9&'.-]+$/i.test(word));
+
+    if (acronyms.length > 0) {
+        variants.push(acronyms.join(' '));
+        if (city) variants.push(`${acronyms[0]} ${city}`);
+    }
+
+    if (words.length > 2) {
+        variants.push(words.slice(0, 2).join(' '));
+    }
+
+    return [...new Set(variants.map((v) => v.trim()).filter(Boolean))].slice(0, 3);
+};
+
 const buildLocalQuery = (input, city) => {
-    const trimmed = (input || '').trim();
+    const trimmed = normalizeSearchInput(input);
     if (!trimmed) return trimmed;
     if (!city) return trimmed;
     const cityLower = city.toLowerCase();
@@ -96,16 +129,25 @@ const dedupeSuggestions = (items) => {
     });
 };
 
-const rankLocalSuggestions = (suggestions, { lat, lng, city }) => {
+const rankLocalSuggestions = (suggestions, { lat, lng, city, query = '' }) => {
     if (!suggestions.length) return [];
 
     const cityLower = city ? city.toLowerCase() : null;
+    const tokens = getQueryTokens(query);
+    const hasAcronym = tokens.some((token) => token.length <= 5);
 
     const ranked = suggestions.map((s) => {
         let score = 0;
         const text = `${s.description || ''} ${s.secondary_text || ''}`.toLowerCase();
+        const mainText = `${s.main_text || ''}`.toLowerCase();
 
         if (cityLower && text.includes(cityLower)) score += 100;
+
+        tokens.forEach((token) => {
+            if (mainText.includes(token)) score += 140;
+            else if (text.includes(token)) score += 50;
+            if (mainText.startsWith(token)) score += 80;
+        });
 
         if (lat != null && lng != null && s.lat != null && s.lng != null) {
             const dist = haversineKm(lat, lng, s.lat, s.lng);
@@ -119,7 +161,18 @@ const rankLocalSuggestions = (suggestions, { lat, lng, city }) => {
         return { ...s, _score: score };
     });
 
-    const local = ranked.filter((s) => {
+    const tokenMatched = ranked.filter((s) => {
+        if (!tokens.length) return true;
+        const mainText = `${s.main_text || ''}`.toLowerCase();
+        const text = `${s.description || ''}`.toLowerCase();
+        return tokens.some((token) => mainText.includes(token) || text.includes(token));
+    });
+
+    const local = (tokenMatched.length > 0 ? tokenMatched : ranked).filter((s) => {
+        if (hasAcronym) {
+            const mainText = `${s.main_text || ''}`.toLowerCase();
+            if (!tokens.some((token) => mainText.includes(token))) return false;
+        }
         if (lat == null || lng == null || s.lat == null || s.lng == null) {
             return cityLower ? `${s.description || ''}`.toLowerCase().includes(cityLower) : true;
         }
@@ -127,7 +180,7 @@ const rankLocalSuggestions = (suggestions, { lat, lng, city }) => {
             || (cityLower && `${s.description || ''}`.toLowerCase().includes(cityLower));
     });
 
-    const pool = local.length > 0 ? local : ranked;
+    const pool = local.length > 0 ? local : (tokenMatched.length > 0 ? tokenMatched : ranked);
     return dedupeSuggestions(
         pool.sort((a, b) => b._score - a._score),
     )
@@ -453,7 +506,7 @@ const getAutocompleteSuggestions = async (input, options = {}) => {
                         main_text: p.structured_formatting.main_text,
                         secondary_text: p.structured_formatting.secondary_text,
                     })),
-                    { lat, lng, city },
+                    { lat, lng, city, query: input },
                 );
                 return finish(suggestions, 'google');
             }
@@ -469,9 +522,17 @@ const getAutocompleteSuggestions = async (input, options = {}) => {
     }
 
     try {
-        const photonSuggestions = await photonSearch(input, { lat, lng, city });
+        const variants = getSearchVariants(input, city);
+        let photonSuggestions = [];
+        for (const variant of variants) {
+            const batch = await photonSearch(variant, { lat, lng, city });
+            photonSuggestions = dedupeSuggestions([...photonSuggestions, ...batch]);
+        }
         if (photonSuggestions.length > 0) {
-            return finish(rankLocalSuggestions(photonSuggestions, { lat, lng, city }), 'photon');
+            return finish(
+                rankLocalSuggestions(photonSuggestions, { lat, lng, city, query: input }),
+                'photon',
+            );
         }
     } catch (error) {
         console.warn('[Photon] Autocomplete fallback:', error.message);
@@ -480,7 +541,7 @@ const getAutocompleteSuggestions = async (input, options = {}) => {
     try {
         const suggestions = rankLocalSuggestions(
             await nominatimSearch(input, { lat, lng, city, strict: false }),
-            { lat, lng, city },
+            { lat, lng, city, query: input },
         );
         return finish(suggestions, 'nominatim');
     } catch (error) {
