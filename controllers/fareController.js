@@ -67,6 +67,47 @@ const findZoneForPoint = async (lat, lng) => {
     }
 };
 
+const findPricingForTrip = async ({ zone, city, vehicle_type, vehicle_body_type }) => {
+    const bodyType = vehicle_body_type || 'all';
+
+    if (zone?._id) {
+        const zonePricing = await Pricing.findOne({
+            delivery_zone: zone._id,
+            vehicle_type,
+            vehicle_body_type: bodyType,
+            active: true,
+        });
+        if (zonePricing) return zonePricing;
+    }
+
+    if (city) {
+        const cityPricing = await Pricing.findOne({
+            city: { $regex: new RegExp(`^${city}$`, 'i') },
+            vehicle_type,
+            vehicle_body_type: bodyType,
+            active: true,
+            delivery_zone: null,
+        });
+        if (cityPricing) return cityPricing;
+    }
+
+    const defaultPricing = await Pricing.findOne({
+        city: { $regex: /^default$/i },
+        vehicle_type,
+        vehicle_body_type: bodyType,
+        active: true,
+        delivery_zone: null,
+    });
+    if (defaultPricing) return defaultPricing;
+
+    // Last resort: use any active pricing for this vehicle type
+    return Pricing.findOne({
+        vehicle_type,
+        vehicle_body_type: bodyType,
+        active: true,
+    });
+};
+
 /**
  * POST /api/fare/estimate
  * Calculate fare estimate for a trip (Uber/Ola Style)
@@ -79,11 +120,15 @@ const estimateFare = async (req, res) => {
     }
 
     try {
-        // Step 1: Get distance & duration from Google Maps
+        // Step 1: Get distance (Google Maps with Haversine fallback)
         const distResult = await getDistanceAndDuration(pickup_lat, pickup_lng, dropoff_lat, dropoff_lng);
 
         if (!distResult.success) {
             return res.status(400).json({ error: distResult.error || 'Failed to calculate distance' });
+        }
+
+        if (distResult.source === 'estimated') {
+            console.warn('[Fare] Using estimated distance fallback (Google Maps unavailable)');
         }
 
         // Step 2: Detect Zone for pickup
@@ -93,30 +138,9 @@ const estimateFare = async (req, res) => {
         const geoResult = await reverseGeocode(pickup_lat, pickup_lng);
         const city = geoResult.success ? geoResult.city : 'default';
 
-        // Step 4: Find the most specific pricing matrix
-        // Priority: 1. Zone Specific, 2. City Specific, 3. Global Default
-        let pricing = null;
-        
-        if (zone) {
-            pricing = await Pricing.findOne({
-                delivery_zone: zone._id,
-                vehicle_type,
-                vehicle_body_type: vehicle_body_type || 'all',
-                active: true
-            });
-        }
+        // Step 4: Find pricing (zone → city → default → any active)
+        const pricing = await findPricingForTrip({ zone, city, vehicle_type, vehicle_body_type });
 
-        if (!pricing) {
-            pricing = await Pricing.findOne({
-                city: { $regex: new RegExp(`^${city}$`, 'i') },
-                vehicle_type,
-                vehicle_body_type: vehicle_body_type || 'all',
-                active: true,
-                delivery_zone: null // Must be city default
-            });
-        }
-
-        // Fallback: If no pricing found, it means we don't serve this area yet
         if (!pricing) {
             return res.status(404).json({ 
                 success: false,
@@ -364,11 +388,14 @@ const geocode = async (req, res) => {
  * Get address suggestions from Google Places
  */
 const autocomplete = async (req, res) => {
-    const { input } = req.query;
+    const { input, lat, lng } = req.query;
     if (!input) return res.status(400).json({ error: 'Input query is required' });
 
     try {
-        const result = await getAutocompleteSuggestions(input);
+        const result = await getAutocompleteSuggestions(input, {
+            lat: lat != null ? Number(lat) : undefined,
+            lng: lng != null ? Number(lng) : undefined,
+        });
         return res.status(200).json(result);
     } catch (error) {
         return res.status(500).json({ error: error.message });
