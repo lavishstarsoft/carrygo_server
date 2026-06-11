@@ -373,18 +373,21 @@ const findNearbyDrivers = async (lat, lng, vehicle_type, radiusKm = 10) => {
 
         if (nearbyDriverIds.length > 0) {
             console.log(`✅ [findNearbyDrivers] Redis found ${nearbyDriverIds.length} candidate IDs.`);
-            // Fetch full details from MongoDB for the candidates found in Redis
             drivers = await Driver.find({
                 _id: { $in: nearbyDriverIds },
                 ...statusFilter
             })
             .limit(10)
             .select('_id name phone vehicle_type vehicle_number location average_rating fcm_token');
+
+            if (drivers.length === 0) {
+                console.log(`⚠️ [findNearbyDrivers] ${nearbyDriverIds.length} Redis candidates did not pass filters (online/KYC/vehicle_type).`);
+            }
         }
 
         // Priority 2: MongoDB Geospatial Fallback (If Redis returned no matches or is offline)
         if (drivers.length === 0) {
-            console.log('⚠️ [findNearbyDrivers] Redis search yielding 0 results/failed. Falling back to MongoDB...');
+            console.log('⚠️ [findNearbyDrivers] Falling back to MongoDB geospatial search...');
             drivers = await Driver.find({
                 ...statusFilter,
                 location: {

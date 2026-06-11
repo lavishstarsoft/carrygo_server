@@ -27,6 +27,43 @@ const estimateDrivingDistance = (originLat, originLng, destLat, destLng) => {
 };
 
 const LOCAL_RADIUS_KM = 45;
+const AUTOCOMPLETE_CACHE_TTL_MS = 5 * 60 * 1000;
+const NOMINATIM_MIN_INTERVAL_MS = 1100;
+
+const autocompleteCache = new Map();
+let lastNominatimRequestAt = 0;
+let nominatimQueue = Promise.resolve();
+
+const getAutocompleteCacheKey = (input, lat, lng, city) =>
+    `${(input || '').trim().toLowerCase()}|${lat ?? ''}|${lng ?? ''}|${(city || '').toLowerCase()}`;
+
+const readAutocompleteCache = (key) => {
+    const hit = autocompleteCache.get(key);
+    if (!hit) return null;
+    if (Date.now() - hit.at > AUTOCOMPLETE_CACHE_TTL_MS) {
+        autocompleteCache.delete(key);
+        return null;
+    }
+    return hit.value;
+};
+
+const writeAutocompleteCache = (key, value) => {
+    autocompleteCache.set(key, { at: Date.now(), value });
+    if (autocompleteCache.size > 300) {
+        const oldest = autocompleteCache.keys().next().value;
+        autocompleteCache.delete(oldest);
+    }
+};
+
+const runWithNominatimRateLimit = (task) => {
+    nominatimQueue = nominatimQueue.then(async () => {
+        const waitMs = Math.max(0, NOMINATIM_MIN_INTERVAL_MS - (Date.now() - lastNominatimRequestAt));
+        if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+        lastNominatimRequestAt = Date.now();
+        return task();
+    });
+    return nominatimQueue;
+};
 
 const mapNominatimResults = (results = []) => results.map((r) => {
     const parts = (r.display_name || '').split(',').map((p) => p.trim()).filter(Boolean);
@@ -98,6 +135,43 @@ const rankLocalSuggestions = (suggestions, { lat, lng, city }) => {
         .map(({ _score, ...rest }) => rest);
 };
 
+const mapPhotonResults = (features = [], query = '') => features.map((feature) => {
+    const props = feature.properties || {};
+    const [lon, lat] = feature.geometry?.coordinates || [];
+    const parts = [props.name, props.street, props.city, props.state, props.country]
+        .filter(Boolean);
+    const description = parts.join(', ') || query;
+    return {
+        description,
+        place_id: `photon-${props.osm_id || description}`,
+        main_text: props.name || parts[0] || query,
+        secondary_text: parts.slice(1).join(', '),
+        lat: Number(lat),
+        lng: Number(lon),
+    };
+}).filter((item) => Number.isFinite(item.lat) && Number.isFinite(item.lng));
+
+const photonSearch = async (query, { lat, lng, city } = {}) => {
+    const searchQuery = buildLocalQuery(query, city);
+    const params = {
+        q: searchQuery,
+        limit: 12,
+        lang: 'en',
+    };
+
+    if (lat != null && lng != null) {
+        params.lat = lat;
+        params.lon = lng;
+    }
+
+    const response = await axios.get('https://photon.komoot.io/api/', {
+        params,
+        timeout: 8000,
+    });
+
+    return mapPhotonResults(response.data?.features, searchQuery);
+};
+
 const nominatimSearch = async (query, { lat, lng, city, strict = false } = {}) => {
     const searchQuery = buildLocalQuery(query, city);
     const params = {
@@ -114,11 +188,18 @@ const nominatimSearch = async (query, { lat, lng, city, strict = false } = {}) =
         params.bounded = strict ? 1 : 0;
     }
 
-    const response = await axios.get('https://nominatim.openstreetmap.org/search', {
+    const response = await runWithNominatimRateLimit(() => axios.get('https://nominatim.openstreetmap.org/search', {
         params,
         headers: NOMINATIM_HEADERS,
         timeout: 8000,
-    });
+        validateStatus: (status) => status < 500,
+    }));
+
+    if (response.status === 429) {
+        const err = new Error('Nominatim rate limited');
+        err.code = 'RATE_LIMITED';
+        throw err;
+    }
 
     return mapNominatimResults(response.data);
 };
@@ -325,6 +406,9 @@ const reverseGeocode = async (lat, lng) => {
  */
 const getAutocompleteSuggestions = async (input, options = {}) => {
     let { lat, lng, city } = options;
+    const cacheKey = getAutocompleteCacheKey(input, lat, lng, city);
+    const cached = readAutocompleteCache(cacheKey);
+    if (cached) return cached;
 
     if (lat != null && lng != null && !city) {
         const geo = await reverseGeocode(lat, lng);
@@ -332,6 +416,16 @@ const getAutocompleteSuggestions = async (input, options = {}) => {
     }
 
     const biasedInput = buildLocalQuery(input, city);
+    const finish = (suggestions, source) => {
+        const payload = {
+            success: true,
+            suggestions,
+            city: city || null,
+            source,
+        };
+        writeAutocompleteCache(cacheKey, payload);
+        return payload;
+    };
 
     if (GOOGLE_MAPS_API_KEY) {
         try {
@@ -361,11 +455,11 @@ const getAutocompleteSuggestions = async (input, options = {}) => {
                     })),
                     { lat, lng, city },
                 );
-                return { success: true, suggestions, city: city || null };
+                return finish(suggestions, 'google');
             }
 
             if (data.status === 'ZERO_RESULTS') {
-                return { success: true, suggestions: [], city: city || null };
+                return finish([], 'google');
             }
 
             console.warn('[GoogleMaps] Autocomplete fallback:', data.status);
@@ -375,15 +469,25 @@ const getAutocompleteSuggestions = async (input, options = {}) => {
     }
 
     try {
-        let suggestions = await nominatimSearch(input, { lat, lng, city, strict: true });
-        if (suggestions.length < 3) {
-            const relaxed = await nominatimSearch(input, { lat, lng, city, strict: false });
-            suggestions = dedupeSuggestions([...suggestions, ...relaxed]);
+        const photonSuggestions = await photonSearch(input, { lat, lng, city });
+        if (photonSuggestions.length > 0) {
+            return finish(rankLocalSuggestions(photonSuggestions, { lat, lng, city }), 'photon');
         }
-
-        suggestions = rankLocalSuggestions(suggestions, { lat, lng, city });
-        return { success: true, suggestions, city: city || null };
     } catch (error) {
+        console.warn('[Photon] Autocomplete fallback:', error.message);
+    }
+
+    try {
+        const suggestions = rankLocalSuggestions(
+            await nominatimSearch(input, { lat, lng, city, strict: false }),
+            { lat, lng, city },
+        );
+        return finish(suggestions, 'nominatim');
+    } catch (error) {
+        if (error.code === 'RATE_LIMITED') {
+            console.warn('[Nominatim] Autocomplete rate limited, returning empty suggestions');
+            return { success: true, suggestions: [], city: city || null, source: 'rate_limited' };
+        }
         console.error('[Nominatim] Autocomplete Error:', error.message);
         return { success: false, error: error.message, suggestions: [] };
     }
