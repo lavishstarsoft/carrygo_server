@@ -357,9 +357,59 @@ const mergeStepCoordinates = (route) => {
     return merged;
 };
 
+const encodeSignedNumber = (num) => {
+    let sgn = num << 1;
+    if (num < 0) sgn = ~sgn;
+    let output = '';
+    while (sgn >= 0x20) {
+        output += String.fromCharCode((0x20 | (sgn & 0x1f)) + 63);
+        sgn >>= 5;
+    }
+    output += String.fromCharCode(sgn + 63);
+    return output;
+};
+
+const encodePolyline = (coordinates = []) => {
+    let lastLat = 0;
+    let lastLng = 0;
+    let result = '';
+    coordinates.forEach((point) => {
+        const lat = Math.round(point.latitude * 1e5);
+        const lng = Math.round(point.longitude * 1e5);
+        result += encodeSignedNumber(lat - lastLat);
+        result += encodeSignedNumber(lng - lastLng);
+        lastLat = lat;
+        lastLng = lng;
+    });
+    return result;
+};
+
+/** Straight-line densified route when Google Directions is unavailable. */
+const buildFallbackRoute = (originLat, originLng, destLat, destLng) => {
+    const estimate = estimateDrivingDistance(originLat, originLng, destLat, destLng);
+    const steps = Math.max(24, Math.min(100, Math.round(estimate.distance_km * 12)));
+    const coordinates = [];
+    for (let i = 0; i <= steps; i += 1) {
+        const t = i / steps;
+        coordinates.push({
+            latitude: originLat + (destLat - originLat) * t,
+            longitude: originLng + (destLng - originLng) * t,
+        });
+    }
+    return {
+        success: true,
+        polyline: encodePolyline(coordinates),
+        coordinates,
+        distance_km: estimate.distance_km,
+        duration_min: estimate.duration_min,
+        source: 'estimated',
+    };
+};
+
 const getDirections = async (originLat, originLng, destLat, destLng) => {
     if (!GOOGLE_MAPS_API_KEY) {
-        return { success: false, error: 'Directions unavailable' };
+        console.warn('[GoogleMaps] No API key — using estimated route fallback');
+        return buildFallbackRoute(originLat, originLng, destLat, destLng);
     }
 
     try {
@@ -376,8 +426,8 @@ const getDirections = async (originLat, originLng, destLat, destLng) => {
         const data = response.data;
 
         if (data.status !== 'OK' || !data.routes[0]) {
-            console.warn('[GoogleMaps] Directions status:', data.status, data.error_message || '');
-            return { success: false, error: data.error_message || 'No route found' };
+            console.warn('[GoogleMaps] Directions fallback used:', data.status, data.error_message || '');
+            return buildFallbackRoute(originLat, originLng, destLat, destLng);
         }
 
         const route = data.routes[0];
@@ -395,6 +445,7 @@ const getDirections = async (originLat, originLng, destLat, destLng) => {
             duration_min: leg.duration.value / 60,
             start_address: leg.start_address,
             end_address: leg.end_address,
+            source: 'google',
             steps: leg.steps.map(step => ({
                 instruction: step.html_instructions?.replace(/<[^>]*>/g, '') || '',
                 distance: step.distance.text,
@@ -402,8 +453,8 @@ const getDirections = async (originLat, originLng, destLat, destLng) => {
             })),
         };
     } catch (error) {
-        console.error('[GoogleMaps] Directions Error:', error.message);
-        return { success: false, error: error.message };
+        console.error('[GoogleMaps] Directions Error, using fallback:', error.message);
+        return buildFallbackRoute(originLat, originLng, destLat, destLng);
     }
 };
 
