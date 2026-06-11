@@ -134,7 +134,6 @@ const rankLocalSuggestions = (suggestions, { lat, lng, city, query = '' }) => {
 
     const cityLower = city ? city.toLowerCase() : null;
     const tokens = getQueryTokens(query);
-    const hasAcronym = tokens.some((token) => token.length <= 5);
 
     const ranked = suggestions.map((s) => {
         let score = 0;
@@ -161,6 +160,9 @@ const rankLocalSuggestions = (suggestions, { lat, lng, city, query = '' }) => {
         return { ...s, _score: score };
     });
 
+    // Keep results that actually match the typed query, but DO NOT drop far-away
+    // places. Distance/city only affect ranking (via _score above), so the user
+    // sees every matching location — like Google Maps / Rapido / Uber search.
     const tokenMatched = ranked.filter((s) => {
         if (!tokens.length) return true;
         const mainText = `${s.main_text || ''}`.toLowerCase();
@@ -168,23 +170,11 @@ const rankLocalSuggestions = (suggestions, { lat, lng, city, query = '' }) => {
         return tokens.some((token) => mainText.includes(token) || text.includes(token));
     });
 
-    const local = (tokenMatched.length > 0 ? tokenMatched : ranked).filter((s) => {
-        if (hasAcronym) {
-            const mainText = `${s.main_text || ''}`.toLowerCase();
-            if (!tokens.some((token) => mainText.includes(token))) return false;
-        }
-        if (lat == null || lng == null || s.lat == null || s.lng == null) {
-            return cityLower ? `${s.description || ''}`.toLowerCase().includes(cityLower) : true;
-        }
-        return s.distance_km <= LOCAL_RADIUS_KM
-            || (cityLower && `${s.description || ''}`.toLowerCase().includes(cityLower));
-    });
-
-    const pool = local.length > 0 ? local : (tokenMatched.length > 0 ? tokenMatched : ranked);
+    const pool = tokenMatched.length > 0 ? tokenMatched : ranked;
     return dedupeSuggestions(
         pool.sort((a, b) => b._score - a._score),
     )
-        .slice(0, 6)
+        .slice(0, 8)
         .map(({ _score, ...rest }) => rest);
 };
 
@@ -468,7 +458,6 @@ const getAutocompleteSuggestions = async (input, options = {}) => {
         if (geo.success && geo.city) city = geo.city;
     }
 
-    const biasedInput = buildLocalQuery(input, city);
     const finish = (suggestions, source) => {
         const payload = {
             success: true,
@@ -482,17 +471,20 @@ const getAutocompleteSuggestions = async (input, options = {}) => {
 
     if (GOOGLE_MAPS_API_KEY) {
         try {
+            // Use the raw user input (not city-appended) so Google returns ALL matching
+            // places across India — like Google Maps / Rapido / Uber search.
             const params = {
-                input: biasedInput,
+                input: normalizeSearchInput(input) || input,
                 key: GOOGLE_MAPS_API_KEY,
                 components: 'country:in',
                 language: 'en',
             };
 
+            // Bias results toward the user's area WITHOUT hard-restricting them.
+            // No strictbounds => nearby places rank first, but distant places still appear.
             if (lat != null && lng != null) {
                 params.location = `${lat},${lng}`;
-                params.radius = 30000;
-                params.strictbounds = true;
+                params.radius = 50000;
             }
 
             const response = await axios.get('https://maps.googleapis.com/maps/api/place/autocomplete/json', { params });
