@@ -1,6 +1,7 @@
 const Pricing = require('../models/Pricing');
 const DeliveryZone = require('../models/DeliveryZone');
 const { getDistanceAndDuration, reverseGeocode, geocodeAddress, getAutocompleteSuggestions } = require('../services/googleMaps');
+const { computeTripFare } = require('../services/fareCalculation');
 
 // ─── Geometry Helpers ────────────────────────────────────────────────────────
 
@@ -166,50 +167,8 @@ const estimateFare = async (req, res) => {
             });
         }
 
-        // Step 6: Advanced Fare Calculation (Uber/Ola Formula)
-        const base_fare = pricing.base_fare;
-        
-        // Distance Fare: Only apply for distances greater than base_km
+        const fare = computeTripFare(pricing, { distance_km, duration_min });
         const billable_km = Math.max(0, distance_km - (pricing.base_km || 0));
-        const distance_fare = billable_km * pricing.per_km_rate;
-        
-        // Time Fare
-        const time_fare = duration_min * pricing.per_min_rate;
-        
-        const loading = pricing.loading_charges || 0;
-
-        let subtotal = base_fare + distance_fare + time_fare + loading;
-
-        // Step 6: Apply Multipliers (Surge/Peak)
-        let surge_multiplier = pricing.surge_multiplier || 1.0;
-        let surge_amount = 0;
-
-        if (pricing.surge_active && surge_multiplier > 1) {
-            surge_amount = subtotal * (surge_multiplier - 1);
-            subtotal = subtotal * surge_multiplier;
-        } else if (pricing.peak_hours?.length > 0) {
-            const now = new Date();
-            const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-            const peakHour = pricing.peak_hours.find(ph => currentTime >= ph.start && currentTime <= ph.end);
-            if (peakHour) {
-                surge_multiplier = peakHour.multiplier;
-                surge_amount = subtotal * (surge_multiplier - 1);
-                subtotal = subtotal * surge_multiplier;
-            }
-        }
-
-        // Step 7: Apply Min/Max Constraints
-        let total = Math.max(subtotal, pricing.min_fare);
-        if (pricing.max_fare > 0) {
-            total = Math.min(total, pricing.max_fare);
-        }
-
-        total = Math.round(total);
-
-        // Step 8: Calculate platform split
-        const commission_percent = pricing.platform_commission_percent || 15;
-        const commission_amount = Math.round(total * commission_percent / 100);
-        const driver_earnings = total - commission_amount;
 
         const fareEstimate = {
             distance_km: Math.round(distance_km * 10) / 10,
@@ -221,22 +180,9 @@ const estimateFare = async (req, res) => {
             city,
             zone: zone ? zone.name : 'Default City Zone',
             vehicle_type,
-            fare: {
-                base_fare: Math.round(base_fare),
-                base_km: pricing.base_km || 0,
-                distance_fare: Math.round(distance_fare),
-                time_fare: Math.round(time_fare),
-                loading_charges: Math.round(loading),
-                surge_multiplier,
-                surge_amount: Math.round(surge_amount),
-                subtotal: Math.round(subtotal),
-                total,
-                commission_percent,
-                commission_amount,
-                driver_earnings,
-            },
-            surge_active: surge_multiplier > 1,
-            surge_reason: pricing.surge_reason || (surge_multiplier > 1 ? 'High Demand' : ''),
+            fare,
+            surge_active: fare.surge_multiplier > 1,
+            surge_reason: pricing.surge_reason || (fare.surge_multiplier > 1 ? 'High Demand' : ''),
         };
 
         return res.status(200).json(fareEstimate);

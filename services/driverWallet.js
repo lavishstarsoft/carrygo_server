@@ -1,5 +1,6 @@
 const Driver = require('../models/Driver');
 const WalletTransaction = require('../models/WalletTransaction');
+const { splitFareCommission } = require('./fareCalculation');
 
 const parseFare = (fare) => {
     if (!fare) return {};
@@ -24,12 +25,11 @@ const settleDriverWalletOnDelivery = async (order) => {
     if (existing) return existing;
 
     const fare = parseFare(order.fare);
-    const totalFare = roundMoney(fare.total);
-    const commissionAmount = roundMoney(fare.commission_amount);
-    const driverEarnings = roundMoney(
-        fare.driver_earnings != null ? fare.driver_earnings : totalFare - commissionAmount,
-    );
-    const commissionPercent = Number(fare.commission_percent) || 0;
+    const split = splitFareCommission(fare.total, fare.commission_percent || 15);
+    const totalFare = roundMoney(split.total);
+    const commissionAmount = roundMoney(split.commission_amount);
+    const driverEarnings = roundMoney(split.driver_earnings);
+    const commissionPercent = split.commission_percent;
     const paymentMethod = order.payment_method || 'cash';
     const isCash = paymentMethod === 'cash';
 

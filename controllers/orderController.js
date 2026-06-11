@@ -14,6 +14,7 @@ const {
 const { registerSearchingReconcile } = require('../services/productionJobs');
 const WalletTransaction = require('../models/WalletTransaction');
 const { settleDriverWalletOnDelivery } = require('../services/driverWallet');
+const { computeTripFare, splitFareCommission } = require('../services/fareCalculation');
 
 // ─── Dispatch Helpers (Rapido-style one-by-one) ──────────────────────────
 const OFFER_TTL_MS = parseInt(process.env.DRIVER_OFFER_TTL_MS || '30000', 10); // 30s per driver
@@ -267,44 +268,16 @@ const calculateFare = async (pickup, dropoff, vehicle_type, vehicle_body_type) =
         error.status = 400;
         throw error;
     }
-    const base_fare = pricing.base_fare;
-    const distance_fare = distance_km * pricing.per_km_rate;
-    const time_fare = duration_min * pricing.per_min_rate;
-    const loading = pricing.loading_charges || 0;
-
-    let subtotal = base_fare + distance_fare + time_fare + loading;
-    let surge_multiplier = 1.0;
-    let surge_amount = 0;
-
-    if (pricing.surge_active && pricing.surge_multiplier > 1) {
-        surge_multiplier = pricing.surge_multiplier;
-        surge_amount = subtotal * (surge_multiplier - 1);
-        subtotal *= surge_multiplier;
-    }
-
-    let total = Math.max(Math.round(subtotal), pricing.min_fare);
-    if (pricing.max_fare > 0) total = Math.min(total, pricing.max_fare);
-
-    const commission_percent = pricing.platform_commission_percent || 15;
-    const commission_amount = Math.round(total * commission_percent / 100);
+    const fare = computeTripFare(pricing, { distance_km, duration_min });
 
     return {
         distance_km: Math.round(distance_km * 10) / 10,
         duration_min: Math.round(duration_min),
+        travel_duration_min,
         city,
         fare: {
-            base_fare: Math.round(base_fare),
-            distance_fare: Math.round(distance_fare),
-            time_fare: Math.round(time_fare),
-            loading_charges: Math.round(loading),
-            surge_multiplier,
-            surge_amount: Math.round(surge_amount),
-            subtotal: Math.round(subtotal),
+            ...fare,
             platform_fee: 0,
-            total,
-            commission_percent,
-            commission_amount,
-            driver_earnings: total - commission_amount,
         },
     };
 };
@@ -828,11 +801,14 @@ const updateOrderStatus = async (req, res) => {
                     order.fare.total = Math.max(Math.round(order.fare.subtotal), pricing.min_fare);
                     if (pricing.max_fare > 0) order.fare.total = Math.min(order.fare.total, pricing.max_fare);
 
-                    // Update commission and earnings
-                    const commPercent = pricing.platform_commission_percent || 15;
-                    order.fare.commission_amount = Math.round(order.fare.total * commPercent / 100);
-                    order.fare.driver_earnings = order.fare.total - order.fare.commission_amount;
-                    
+                    const split = splitFareCommission(
+                        order.fare.total,
+                        pricing.platform_commission_percent || 15,
+                    );
+                    order.fare.commission_percent = split.commission_percent;
+                    order.fare.commission_amount = split.commission_amount;
+                    order.fare.driver_earnings = split.driver_earnings;
+
                     order.markModified('fare');
                 }
             }
