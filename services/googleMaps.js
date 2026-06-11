@@ -297,6 +297,66 @@ const getDistanceAndDuration = async (originLat, originLng, destLat, destLng) =>
 /**
  * Get directions (route polyline) between two points
  */
+const decodePolyline = (encoded) => {
+    const points = [];
+    let index = 0;
+    const len = encoded.length;
+    let lat = 0;
+    let lng = 0;
+
+    while (index < len) {
+        let shift = 0;
+        let result = 0;
+        let b;
+        do {
+            b = encoded.charCodeAt(index++) - 63;
+            result |= (b & 0x1f) << shift;
+            shift += 5;
+        } while (b >= 0x20);
+        const dlat = (result & 1) ? ~(result >> 1) : (result >> 1);
+        lat += dlat;
+
+        shift = 0;
+        result = 0;
+        do {
+            b = encoded.charCodeAt(index++) - 63;
+            result |= (b & 0x1f) << shift;
+            shift += 5;
+        } while (b >= 0x20);
+        const dlng = (result & 1) ? ~(result >> 1) : (result >> 1);
+        lng += dlng;
+
+        points.push({ latitude: lat / 1e5, longitude: lng / 1e5 });
+    }
+
+    return points;
+};
+
+const mergeStepCoordinates = (route) => {
+    const merged = [];
+    const legs = route?.legs || [];
+
+    legs.forEach((leg) => {
+        (leg.steps || []).forEach((step) => {
+            const encoded = step?.polyline?.points;
+            if (!encoded) return;
+            const segment = decodePolyline(encoded);
+            segment.forEach((point) => {
+                const prev = merged[merged.length - 1];
+                if (
+                    !prev
+                    || Math.abs(prev.latitude - point.latitude) > 1e-6
+                    || Math.abs(prev.longitude - point.longitude) > 1e-6
+                ) {
+                    merged.push(point);
+                }
+            });
+        });
+    });
+
+    return merged;
+};
+
 const getDirections = async (originLat, originLng, destLat, destLng) => {
     if (!GOOGLE_MAPS_API_KEY) {
         return { success: false, error: 'Directions unavailable' };
@@ -309,21 +369,28 @@ const getDirections = async (originLat, originLng, destLat, destLng) => {
                 destination: `${destLat},${destLng}`,
                 key: GOOGLE_MAPS_API_KEY,
                 mode: 'driving',
+                alternatives: false,
             },
         });
 
         const data = response.data;
 
         if (data.status !== 'OK' || !data.routes[0]) {
-            return { success: false, error: 'No route found' };
+            console.warn('[GoogleMaps] Directions status:', data.status, data.error_message || '');
+            return { success: false, error: data.error_message || 'No route found' };
         }
 
         const route = data.routes[0];
         const leg = route.legs[0];
+        const coordinates = mergeStepCoordinates(route);
+        const fallbackCoordinates = route.overview_polyline?.points
+            ? decodePolyline(route.overview_polyline.points)
+            : [];
 
         return {
             success: true,
             polyline: route.overview_polyline.points,
+            coordinates: coordinates.length > 1 ? coordinates : fallbackCoordinates,
             distance_km: leg.distance.value / 1000,
             duration_min: leg.duration.value / 60,
             start_address: leg.start_address,

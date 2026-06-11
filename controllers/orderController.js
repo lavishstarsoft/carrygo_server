@@ -1149,6 +1149,7 @@ const getRoute = async (req, res) => {
         return res.status(200).json({
             success: true,
             polyline: dirResult.polyline,
+            coordinates: dirResult.coordinates || [],
             distance_km: dirResult.distance_km,
             duration_min: dirResult.duration_min,
         });
