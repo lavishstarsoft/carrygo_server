@@ -1,33 +1,10 @@
 const Driver = require('../models/Driver');
 const Notification = require('../models/Notification');
 const path = require('path');
-const { redis } = require('../config/redis');
-
-const syncDriverGeoIndex = async (driver) => {
-    if (!driver?._id) return;
-    const id = String(driver._id);
-    const coords = driver.location?.coordinates;
-    const latitude = coords?.[1] ?? driver.latitude;
-    const longitude = coords?.[0] ?? driver.longitude;
-
-    const canIndex = driver.is_active
-        && !driver.is_on_trip
-        && !driver.is_blocked
-        && /approved/i.test(driver.kyc_status || '')
-        && latitude != null
-        && longitude != null;
-
-    try {
-        if (canIndex) {
-            await redis.geoadd('drivers_locations', Number(longitude), Number(latitude), id);
-            console.log(`📍 [Redis] Indexed driver ${id} at ${latitude},${longitude}`);
-        } else {
-            await redis.zrem('drivers_locations', id);
-        }
-    } catch (redisErr) {
-        console.error('❌ [Redis GEO sync Error]:', redisErr.message);
-    }
-};
+const {
+    syncDriverGeoIndex,
+    releaseStaleDriverTripState,
+} = require('../services/driverAvailability');
 
 const getAllDrivers = async (req, res) => {
     try {
@@ -61,7 +38,13 @@ const updateDriver = async (req, res) => {
         }
 
         if (Object.prototype.hasOwnProperty.call(req.body, 'is_active')) {
-            await syncDriverGeoIndex(data);
+            if (req.body.is_active === true) {
+                await releaseStaleDriverTripState(id);
+                const refreshed = await Driver.findById(id);
+                if (refreshed) await syncDriverGeoIndex(refreshed);
+            } else {
+                await syncDriverGeoIndex(data);
+            }
         }
 
         const io = req.app.get('io');

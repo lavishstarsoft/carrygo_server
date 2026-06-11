@@ -5,9 +5,15 @@ const Notification = require('../models/Notification');
 const { getDistanceAndDuration, getDirections, reverseGeocode } = require('../services/googleMaps');
 const Pricing = require('../models/Pricing');
 const { redis } = require('../config/redis');
+const {
+    releaseStaleDriverTripState,
+    releaseStaleTripStateNearPickup,
+} = require('../services/driverAvailability');
 
 // ─── Dispatch Helpers (Rapido-style one-by-one) ──────────────────────────
 const OFFER_TTL_MS = parseInt(process.env.DRIVER_OFFER_TTL_MS || '30000', 10); // 30s per driver
+const DISPATCH_RETRY_COOLDOWN_MS = 30000;
+const lastDispatchRetryRef = new Map();
 
 const offerExpiresMs = (value) => {
     if (!value) return 0;
@@ -354,6 +360,9 @@ const createBooking = async (req, res) => {
         // Emit event to find nearby drivers (Rapido-style one-by-one dispatch)
         const io = req.app.get('io');
         if (io) {
+            // Unlock drivers stuck with is_on_trip=true but no active order (common after cancel/crash).
+            await releaseStaleTripStateNearPickup(pickup.lat, pickup.lng, 15);
+
             // Find nearby available drivers
             const nearbyDrivers = await findNearbyDrivers(pickup.lat, pickup.lng, vehicle_type, 10);
             
@@ -427,6 +436,56 @@ const createBooking = async (req, res) => {
             code: error.code || 'INTERNAL_ERROR' 
         });
     }
+};
+
+const reconcileSearchingOrderDispatch = async (order, io) => {
+    if (!order || order.status !== 'searching' || !io || !order.pickup?.lat || !order.pickup?.lng) {
+        return order;
+    }
+
+    const hasLiveOffer = order.offered_driver_id
+        && order.offer_expires_at
+        && offerExpiresMs(order.offer_expires_at) > Date.now();
+    if (hasLiveOffer) return order;
+
+    const candidates = order.dispatch_candidate_driver_ids || [];
+    const needsRetry = candidates.length === 0 || !order.offered_driver_id;
+    if (!needsRetry) return order;
+
+    const key = String(order._id);
+    const lastRetry = lastDispatchRetryRef.get(key) || 0;
+    if (Date.now() - lastRetry < DISPATCH_RETRY_COOLDOWN_MS) return order;
+    lastDispatchRetryRef.set(key, Date.now());
+
+    await releaseStaleTripStateNearPickup(order.pickup.lat, order.pickup.lng, 15);
+    const nearbyDrivers = await findNearbyDrivers(
+        order.pickup.lat,
+        order.pickup.lng,
+        order.vehicle_type,
+        10,
+    );
+
+    if (nearbyDrivers.length === 0) {
+        console.log(`⚠️ [reconcileDispatch] No drivers for order ${key}`);
+        return order;
+    }
+
+    order.dispatch_candidate_driver_ids = nearbyDrivers.map((d) => d._id);
+    order.dispatch_cursor = 0;
+    order.offered_driver_id = undefined;
+    order.offer_expires_at = undefined;
+    order.offer_attempt = 0;
+    order.timeline.push({
+        status: 'searching',
+        timestamp: new Date(),
+        note: 'Re-dispatching after refreshing nearby drivers.',
+    });
+    await order.save();
+    await dispatchNextDriver(order._id, io, 'Re-dispatch retry.');
+
+    return Order.findById(order._id)
+        .populate('user_id', 'name phone average_rating')
+        .populate('driver_id', 'name phone vehicle_type vehicle_number average_rating location');
 };
 
 // ─── FIND NEARBY DRIVERS ──────────────────────────────────────
@@ -531,6 +590,8 @@ const getPendingOrdersForDriver = async (req, res) => {
     const driver_id = req.driver.id;
 
     try {
+        await releaseStaleDriverTripState(driver_id);
+
         const driver = await Driver.findById(driver_id);
         if (!driver) {
             return res.status(404).json({ error: 'Driver not found' });
@@ -1062,6 +1123,13 @@ const getOrderById = async (req, res) => {
             .populate('driver_id', 'name phone vehicle_type vehicle_number average_rating location');
 
         if (!order) return res.status(404).json({ error: 'Order not found' });
+
+        const io = req.app.get('io');
+        if (order.status === 'searching' && io) {
+            const refreshed = await reconcileSearchingOrderDispatch(order, io);
+            if (refreshed) return res.status(200).json(refreshed);
+        }
+
         return res.status(200).json(order);
     } catch (error) {
         return res.status(500).json({ error: error.message });
@@ -1077,6 +1145,10 @@ const getActiveOrder = async (req, res) => {
         })
             .populate('user_id', 'name phone')
             .sort({ createdAt: -1 });
+
+        if (!order) {
+            await releaseStaleDriverTripState(req.driver.id);
+        }
 
         return res.status(200).json(order);
     } catch (error) {
