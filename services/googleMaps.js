@@ -384,8 +384,60 @@ const encodePolyline = (coordinates = []) => {
     return result;
 };
 
-/** Straight-line densified route when Google Directions is unavailable. */
-const buildFallbackRoute = (originLat, originLng, destLat, destLng) => {
+const OSRM_BASE_URL = (process.env.OSRM_BASE_URL || 'https://router.project-osrm.org').replace(/\/$/, '');
+
+/** OpenStreetMap road routing via OSRM (free, follows real roads). */
+const getOsrmDirections = async (originLat, originLng, destLat, destLng) => {
+    try {
+        const response = await axios.get(
+            `${OSRM_BASE_URL}/route/v1/driving/${originLng},${originLat};${destLng},${destLat}`,
+            {
+                params: {
+                    overview: 'full',
+                    geometries: 'polyline',
+                    steps: true,
+                },
+                timeout: 10000,
+            },
+        );
+
+        const data = response.data;
+        if (data.code !== 'Ok' || !data.routes?.[0]) {
+            console.warn('[OSRM] Route unavailable:', data.code, data.message || '');
+            return null;
+        }
+
+        const route = data.routes[0];
+        const encoded = route.geometry || '';
+        const coordinates = encoded ? decodePolyline(encoded) : [];
+        if (coordinates.length < 2) return null;
+
+        return {
+            success: true,
+            polyline: encoded,
+            coordinates,
+            distance_km: (route.distance || 0) / 1000,
+            duration_min: (route.duration || 0) / 60,
+            source: 'osrm',
+        };
+    } catch (error) {
+        console.warn('[OSRM] Directions error:', error.message);
+        return null;
+    }
+};
+
+const resolveDirectionsFallback = async (originLat, originLng, destLat, destLng) => {
+    const osrm = await getOsrmDirections(originLat, originLng, destLat, destLng);
+    if (osrm) {
+        console.log(`[Directions] OSRM road route: ${osrm.coordinates.length} points, ${osrm.distance_km.toFixed(2)} km`);
+        return osrm;
+    }
+    console.warn('[Directions] OSRM unavailable — using straight-line estimate');
+    return buildStraightLineRoute(originLat, originLng, destLat, destLng);
+};
+
+/** Straight-line densified route — last resort only. */
+const buildStraightLineRoute = (originLat, originLng, destLat, destLng) => {
     const estimate = estimateDrivingDistance(originLat, originLng, destLat, destLng);
     const steps = Math.max(24, Math.min(100, Math.round(estimate.distance_km * 12)));
     const coordinates = [];
@@ -408,8 +460,8 @@ const buildFallbackRoute = (originLat, originLng, destLat, destLng) => {
 
 const getDirections = async (originLat, originLng, destLat, destLng) => {
     if (!GOOGLE_MAPS_API_KEY) {
-        console.warn('[GoogleMaps] No API key — using estimated route fallback');
-        return buildFallbackRoute(originLat, originLng, destLat, destLng);
+        console.warn('[GoogleMaps] No API key — using OSRM road routing');
+        return resolveDirectionsFallback(originLat, originLng, destLat, destLng);
     }
 
     try {
@@ -426,8 +478,8 @@ const getDirections = async (originLat, originLng, destLat, destLng) => {
         const data = response.data;
 
         if (data.status !== 'OK' || !data.routes[0]) {
-            console.warn('[GoogleMaps] Directions fallback used:', data.status, data.error_message || '');
-            return buildFallbackRoute(originLat, originLng, destLat, destLng);
+            console.warn('[GoogleMaps] Google failed, trying OSRM:', data.status, data.error_message || '');
+            return resolveDirectionsFallback(originLat, originLng, destLat, destLng);
         }
 
         const route = data.routes[0];
@@ -453,8 +505,8 @@ const getDirections = async (originLat, originLng, destLat, destLng) => {
             })),
         };
     } catch (error) {
-        console.error('[GoogleMaps] Directions Error, using fallback:', error.message);
-        return buildFallbackRoute(originLat, originLng, destLat, destLng);
+        console.error('[GoogleMaps] Directions error, trying OSRM:', error.message);
+        return resolveDirectionsFallback(originLat, originLng, destLat, destLng);
     }
 };
 
