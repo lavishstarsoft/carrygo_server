@@ -12,6 +12,8 @@ const {
     setDriverTripState,
 } = require('../services/driverAvailability');
 const { registerSearchingReconcile } = require('../services/productionJobs');
+const WalletTransaction = require('../models/WalletTransaction');
+const { settleDriverWalletOnDelivery } = require('../services/driverWallet');
 
 // ─── Dispatch Helpers (Rapido-style one-by-one) ──────────────────────────
 const OFFER_TTL_MS = parseInt(process.env.DRIVER_OFFER_TTL_MS || '30000', 10); // 30s per driver
@@ -181,7 +183,10 @@ const dispatchNextDriver = async (orderId, io, reasonNote = '') => {
             distance_km: order.distance_km,
             duration_min: order.duration_min,
             fare_total: order.fare?.total,
+            commission_amount: order.fare?.commission_amount,
+            commission_percent: order.fare?.commission_percent,
             driver_earnings: order.fare?.driver_earnings,
+            payment_method: order.payment_method,
             vehicle_type: order.vehicle_type,
             goods_type: order.goods_type,
             goods_description: order.goods_description,
@@ -848,6 +853,8 @@ const updateOrderStatus = async (req, res) => {
             note: getStatusNote(status),
         });
 
+        let walletSettlement = null;
+
         if (status === 'delivered') {
             order.payment_status = order.payment_method === 'cash' ? 'completed' : order.payment_status;
             if (delivery_photo) order.delivery_photo = delivery_photo;
@@ -859,6 +866,8 @@ const updateOrderStatus = async (req, res) => {
                     total_earnings: order.fare.driver_earnings,
                 },
             });
+
+            walletSettlement = await settleDriverWalletOnDelivery(order);
 
             // Update user stats
             await User.findByIdAndUpdate(order.user_id, {
@@ -932,7 +941,11 @@ const updateOrderStatus = async (req, res) => {
         }
 
         const populated = await Order.findById(id).populate('user_id').populate('driver_id');
-        return res.status(200).json(populated);
+        const response = populated?.toObject ? populated.toObject() : populated;
+        if (walletSettlement) {
+            response.wallet_settlement = walletSettlement;
+        }
+        return res.status(200).json(response);
     } catch (error) {
         console.error('[Order] Update Status Error:', error.message);
         return res.status(500).json({ error: error.message });
@@ -1256,19 +1269,79 @@ const getDriverEarnings = async (req, res) => {
             return sum + (Number(plain.distance_km) || 0);
         }, 0);
 
-        const driver = await Driver.findById(driver_id).select('total_earnings total_deliveries average_rating');
+        const driver = await Driver.findById(driver_id).select('total_earnings wallet_balance total_deliveries average_rating');
 
         return res.status(200).json({
             total_earnings: Math.round(totalEarnings * 100) / 100,
             total_trips: totalTrips,
             total_distance_km: Math.round(totalDistance * 10) / 10,
             lifetime_earnings: Number(driver?.total_earnings) || 0,
+            wallet_balance: Number(driver?.wallet_balance) || 0,
             lifetime_trips: Number(driver?.total_deliveries) || 0,
             average_rating: driver?.average_rating ?? 5,
             orders: orders.map(toPlainOrder),
         });
     } catch (error) {
         console.error('[getDriverEarnings] Error:', error);
+        return res.status(500).json({ error: error.message });
+    }
+};
+
+// GET driver wallet + passbook (Rapido-style)
+const getDriverWallet = async (req, res) => {
+    try {
+        const driver_id = String(req.driver.id);
+        const { period, limit = 50 } = req.query;
+
+        const driver = await Driver.findById(driver_id).select('wallet_balance total_earnings total_deliveries');
+        if (!driver) return res.status(404).json({ error: 'Driver not found' });
+
+        let txQuery = WalletTransaction.find({ driver_id }).sort({ createdAt: -1 });
+        if (limit) txQuery = txQuery.limit(Math.min(parseInt(limit, 10) || 50, 100));
+
+        const allTx = await txQuery;
+        const transactions = (Array.isArray(allTx) ? allTx : []).map((tx) => {
+            const plain = tx?.toObject ? tx.toObject() : tx;
+            return plain;
+        });
+
+        const filterTxByPeriod = (txList) => {
+            if (!period) return txList;
+            const now = new Date();
+            return txList.filter((tx) => {
+                const at = new Date(tx.createdAt || tx.created_at);
+                if (Number.isNaN(at.getTime())) return false;
+                if (period === 'today') return isOrderInPeriod({ updatedAt: at }, 'today');
+                if (period === 'week') {
+                    const weekAgo = new Date();
+                    weekAgo.setDate(weekAgo.getDate() - 7);
+                    return at >= weekAgo;
+                }
+                if (period === 'month') {
+                    const parts = getISTDateParts(at);
+                    const nowParts = getISTDateParts(now);
+                    return parts.year === nowParts.year && parts.month === nowParts.month;
+                }
+                return true;
+            });
+        };
+
+        const periodTx = filterTxByPeriod(transactions);
+        const periodEarnings = periodTx.reduce((sum, tx) => sum + (Number(tx.driver_earnings) || 0), 0);
+        const periodCommission = periodTx.reduce((sum, tx) => sum + (Number(tx.commission_amount) || 0), 0);
+
+        return res.status(200).json({
+            wallet_balance: Number(driver.wallet_balance) || 0,
+            lifetime_earnings: Number(driver.total_earnings) || 0,
+            lifetime_trips: Number(driver.total_deliveries) || 0,
+            period: period || 'all',
+            period_earnings: Math.round(periodEarnings * 100) / 100,
+            period_commission: Math.round(periodCommission * 100) / 100,
+            period_trips: periodTx.length,
+            transactions: period ? periodTx : transactions,
+        });
+    } catch (error) {
+        console.error('[getDriverWallet] Error:', error);
         return res.status(500).json({ error: error.message });
     }
 };
@@ -1373,6 +1446,7 @@ module.exports = {
     getActiveOrder,
     getUserActiveOrder,
     getDriverEarnings,
+    getDriverWallet,
     getNearbyDriversForMap,
     getPendingOrdersForDriver,
     getRoute,

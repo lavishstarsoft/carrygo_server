@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS drivers (
     is_on_trip              BOOLEAN DEFAULT FALSE,
     current_order_id        TEXT,
     total_earnings          NUMERIC DEFAULT 0,
+    wallet_balance          NUMERIC DEFAULT 0,
     total_deliveries        INTEGER DEFAULT 0,
     average_rating          NUMERIC DEFAULT 5.0,
     total_ratings           INTEGER DEFAULT 0,
@@ -232,6 +233,26 @@ CREATE TABLE IF NOT EXISTS payments (
 CREATE INDEX IF NOT EXISTS idx_payments_order ON payments (order_id);
 CREATE INDEX IF NOT EXISTS idx_payments_user ON payments (user_id);
 CREATE INDEX IF NOT EXISTS idx_payments_driver ON payments (driver_id);
+
+-- ─── Driver Wallet Transactions (Rapido-style passbook) ─────────────────────
+CREATE TABLE IF NOT EXISTS wallet_transactions (
+    id                  TEXT PRIMARY KEY,
+    driver_id           TEXT NOT NULL REFERENCES drivers(id) ON DELETE CASCADE,
+    order_id            TEXT REFERENCES orders(id) ON DELETE SET NULL,
+    order_number        TEXT DEFAULT '',
+    type                TEXT DEFAULT 'trip_earning',
+    payment_method      TEXT DEFAULT 'cash',
+    total_fare          NUMERIC DEFAULT 0,
+    commission_amount   NUMERIC DEFAULT 0,
+    commission_percent  NUMERIC DEFAULT 0,
+    driver_earnings     NUMERIC DEFAULT 0,
+    wallet_delta        NUMERIC DEFAULT 0,
+    balance_after       NUMERIC DEFAULT 0,
+    note                TEXT DEFAULT '',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_wallet_tx_driver_created ON wallet_transactions (driver_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wallet_tx_order_unique ON wallet_transactions (order_id) WHERE order_id IS NOT NULL;
 
 -- Deferred FK: orders.payment_id → payments
 ALTER TABLE orders DROP CONSTRAINT IF EXISTS fk_orders_payment;

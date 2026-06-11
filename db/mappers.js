@@ -110,6 +110,14 @@ const otpFromRow = (row) => {
 const settingFromRow = (row) => baseFromRow(row);
 const adminFromRow = (row) => baseFromRow(row);
 
+const walletTransactionFromRow = (row) => {
+    const doc = baseFromRow(row);
+    if (!doc) return null;
+    if (doc.driver_id) doc.driver_id = doc.driver_id;
+    if (doc.order_id) doc.order_id = doc.order_id;
+    return doc;
+};
+
 const FROM_ROW = {
     users: userFromRow,
     drivers: driverFromRow,
@@ -121,6 +129,7 @@ const FROM_ROW = {
     otps: otpFromRow,
     settings: settingFromRow,
     admins: adminFromRow,
+    wallet_transactions: walletTransactionFromRow,
 };
 
 // ─── API doc → Row (snake_case DB) ───────────────────────────────────────────
@@ -149,7 +158,7 @@ const driverToRow = (doc) => {
         'kyc_status','kyc_rejection_reason','kyc_issue_document','kyc_issue_reason','kyc_issues',
         'aadhaar_front','aadhaar_back','pan_front','pan_back','license_front','license_back',
         'rc_front','rc_back','insurance','selfie','driver_is_self','driver_name','driver_phone',
-        'is_on_trip','current_order_id','total_earnings','total_deliveries','average_rating',
+        'is_on_trip','current_order_id','total_earnings','wallet_balance','total_deliveries','average_rating',
         'total_ratings','fcm_token','is_blocked','block_reason','vehicles'];
     fields.forEach((f) => { if (doc[f] !== undefined) row[f] = doc[f]; });
     if (row.current_order_id) row.current_order_id = String(row.current_order_id);
@@ -241,6 +250,18 @@ const adminToRow = (doc) => {
     return row;
 };
 
+const walletTransactionToRow = (doc) => {
+    const row = baseToRow(doc);
+    const fields = [
+        'driver_id', 'order_id', 'order_number', 'type', 'payment_method',
+        'total_fare', 'commission_amount', 'commission_percent', 'driver_earnings',
+        'wallet_delta', 'balance_after', 'note',
+    ];
+    fields.forEach((f) => { if (doc[f] !== undefined) row[f] = doc[f]; });
+    ['driver_id', 'order_id'].forEach((f) => { if (row[f]) row[f] = String(row[f]); });
+    return row;
+};
+
 const TO_ROW = {
     users: userToRow,
     drivers: driverToRow,
@@ -252,6 +273,7 @@ const TO_ROW = {
     otps: otpToRow,
     settings: settingToRow,
     admins: adminToRow,
+    wallet_transactions: walletTransactionToRow,
 };
 
 module.exports = {

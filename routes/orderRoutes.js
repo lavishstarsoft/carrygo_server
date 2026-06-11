@@ -20,6 +20,7 @@ router.get('/driver-orders', driverAuth, orderController.getDriverOrders);
 router.get('/driver-active', driverAuth, orderController.getActiveOrder);
 router.get('/pending-for-driver', driverAuth, orderController.getPendingOrdersForDriver);
 router.get('/driver-earnings', driverAuth, orderController.getDriverEarnings);
+router.get('/driver-wallet', driverAuth, orderController.getDriverWallet);
 
 // ─── Admin / Shared Routes ───────────────────────────────────
 router.get('/', orderController.getAllOrders);
