@@ -88,9 +88,69 @@ const refundPayment = async (paymentId, amount, notes = {}) => {
     }
 };
 
+/**
+ * Create a single-use UPI QR code for driver-side collection (Rapido-style).
+ */
+const createUPIQRCode = async (amount, orderId, notes = {}) => {
+    try {
+        const paymentAmount = Math.round(Number(amount) * 100);
+        const qr = await razorpayInstance.qrCode.create({
+            type: 'upi_qr',
+            usage: 'single_use',
+            fixed_amount: true,
+            payment_amount: paymentAmount,
+            description: `Carry Goo Trip ${String(orderId).slice(-8)}`,
+            close_by: Math.floor(Date.now() / 1000) + 3600,
+            notes: {
+                order_id: String(orderId),
+                ...notes,
+            },
+        });
+
+        console.log('[Razorpay] UPI QR created:', qr.id);
+
+        return {
+            success: true,
+            qr_id: qr.id,
+            image_url: qr.image_url,
+            image_content: qr.image_content,
+            payment_amount: qr.payment_amount,
+            status: qr.status,
+        };
+    } catch (error) {
+        console.error('[Razorpay] Create QR Error:', error.message);
+        return { success: false, error: error.message };
+    }
+};
+
+const fetchQRCode = async (qrId) => {
+    try {
+        const qr = await razorpayInstance.qrCode.fetch(qrId);
+        return { success: true, qr };
+    } catch (error) {
+        console.error('[Razorpay] Fetch QR Error:', error.message);
+        return { success: false, error: error.message };
+    }
+};
+
+const verifyWebhookSignature = (body, signature) => {
+    try {
+        const expected = crypto
+            .createHmac('sha256', process.env.RAZORPAY_WEBHOOK_SECRET || process.env.RAZORPAY_KEY_SECRET)
+            .update(body)
+            .digest('hex');
+        return expected === signature;
+    } catch {
+        return false;
+    }
+};
+
 module.exports = {
     createRazorpayOrder,
+    createUPIQRCode,
+    fetchQRCode,
     verifyPaymentSignature,
+    verifyWebhookSignature,
     fetchPayment,
     refundPayment,
     razorpayInstance,

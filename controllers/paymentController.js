@@ -1,10 +1,25 @@
 const Payment = require('../models/Payment');
 const Order = require('../models/Order');
-const { createRazorpayOrder, verifyPaymentSignature, refundPayment } = require('../services/razorpay');
+const {
+    createRazorpayOrder,
+    createUPIQRCode,
+    fetchQRCode,
+    verifyPaymentSignature,
+    verifyWebhookSignature,
+    refundPayment,
+} = require('../services/razorpay');
+const { completeOrderPayment, parseFare } = require('../services/paymentCollection');
+const { splitFareCommission } = require('../services/fareCalculation');
+
+const resolveDriverId = (order, reqDriverId) => {
+    const assigned = String(order.driver_id?._id || order.driver_id || '');
+    const requester = String(reqDriverId || '');
+    return assigned && requester && assigned === requester;
+};
 
 /**
  * POST /api/payments/create-order
- * Create a Razorpay order for online payment
+ * Create a Razorpay order for online payment (user checkout)
  */
 const createPaymentOrder = async (req, res) => {
     const { order_id } = req.body;
@@ -17,14 +32,11 @@ const createPaymentOrder = async (req, res) => {
             return res.status(400).json({ error: 'This order is not set for online payment' });
         }
 
-        // Create Razorpay order
         const rpResult = await createRazorpayOrder(order.fare.total, order._id.toString());
-
         if (!rpResult.success) {
             return res.status(500).json({ error: rpResult.error });
         }
 
-        // Create payment record
         const payment = await Payment.create({
             order_id: order._id,
             user_id: order.user_id,
@@ -37,7 +49,6 @@ const createPaymentOrder = async (req, res) => {
             driver_earnings: order.fare.driver_earnings,
         });
 
-        // Link payment to order
         order.payment_id = payment._id;
         await order.save();
 
@@ -56,57 +67,35 @@ const createPaymentOrder = async (req, res) => {
 
 /**
  * POST /api/payments/verify
- * Verify Razorpay payment signature
  */
 const verifyPayment = async (req, res) => {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, payment_id } = req.body;
 
     try {
-        // Verify signature
         const verification = verifyPaymentSignature(razorpay_order_id, razorpay_payment_id, razorpay_signature);
 
         if (!verification.success) {
-            // Update payment as failed
             await Payment.findByIdAndUpdate(payment_id, {
                 status: 'failed',
                 razorpay_payment_id,
                 razorpay_signature,
             });
-
             return res.status(400).json({ error: 'Payment verification failed' });
         }
 
-        // Update payment as completed
-        const payment = await Payment.findByIdAndUpdate(payment_id, {
-            status: 'completed',
+        const payment = await Payment.findById(payment_id);
+        if (!payment) return res.status(404).json({ error: 'Payment not found' });
+
+        const order = await Order.findById(payment.order_id);
+        if (!order) return res.status(404).json({ error: 'Order not found' });
+
+        const io = req.app.get('io');
+        const result = await completeOrderPayment(order, payment.method || 'razorpay', {
             razorpay_payment_id,
             razorpay_signature,
-        }, { new: true });
+        }, io);
 
-        // Update order payment status
-        if (payment) {
-            await Order.findByIdAndUpdate(payment.order_id, {
-                payment_status: 'completed',
-            });
-
-            // Notify via socket
-            const io = req.app.get('io');
-            if (io) {
-                const order = await Order.findById(payment.order_id);
-                if (order) {
-                    io.emit(`payment_update_${order.driver_id}`, {
-                        order_id: order._id,
-                        payment_status: 'completed',
-                        amount: payment.amount,
-                    });
-                }
-            }
-        }
-
-        return res.status(200).json({
-            message: 'Payment verified successfully',
-            payment,
-        });
+        return res.status(200).json({ message: 'Payment verified successfully', payment: result.payment });
     } catch (error) {
         console.error('[Payment] Verify Error:', error.message);
         return res.status(500).json({ error: error.message });
@@ -114,8 +103,174 @@ const verifyPayment = async (req, res) => {
 };
 
 /**
+ * POST /api/payments/driver-qr/:orderId
+ * Generate Razorpay UPI QR for driver to show customer (Rapido-style).
+ */
+const createDriverQR = async (req, res) => {
+    const { orderId } = req.params;
+
+    try {
+        const order = await Order.findById(orderId);
+        if (!order) return res.status(404).json({ error: 'Order not found' });
+
+        if (!resolveDriverId(order, req.driver.id)) {
+            return res.status(403).json({ error: 'Not your order' });
+        }
+
+        if (!['in_transit', 'picked_up'].includes(order.status)) {
+            return res.status(400).json({ error: 'QR available only during drop-off phase' });
+        }
+
+        if (order.payment_status === 'completed') {
+            return res.status(200).json({
+                already_paid: true,
+                payment_status: 'completed',
+                amount: order.fare?.total,
+            });
+        }
+
+        const fare = parseFare(order.fare);
+        const split = splitFareCommission(fare.total, fare.commission_percent || 15);
+        const amount = split.total;
+
+        if (!amount || amount <= 0) {
+            return res.status(400).json({ error: 'Invalid fare amount' });
+        }
+
+        let payment = await Payment.findOne({ order_id: String(order._id) });
+
+        if (payment?.status === 'pending' && payment.razorpay_order_id && payment.method === 'upi_qr') {
+            const existingQr = await fetchQRCode(payment.razorpay_order_id);
+            if (existingQr.success && existingQr.qr?.status === 'active') {
+                return res.status(200).json({
+                    qr_id: existingQr.qr.id,
+                    image_url: existingQr.qr.image_url,
+                    amount,
+                    commission_amount: split.commission_amount,
+                    driver_earnings: split.driver_earnings,
+                    payment_status: 'pending',
+                    payment_id: payment._id,
+                });
+            }
+        }
+
+        const qrResult = await createUPIQRCode(amount, order._id, {
+            order_number: order.order_number,
+        });
+
+        if (!qrResult.success) {
+            return res.status(500).json({ error: qrResult.error || 'Failed to create QR code' });
+        }
+
+        if (payment) {
+            payment.amount = amount;
+            payment.method = 'upi_qr';
+            payment.status = 'pending';
+            payment.razorpay_order_id = qrResult.qr_id;
+            payment.platform_commission = split.commission_amount;
+            payment.driver_earnings = split.driver_earnings;
+            await payment.save();
+        } else {
+            payment = await Payment.create({
+                order_id: order._id,
+                user_id: order.user_id,
+                driver_id: order.driver_id,
+                amount,
+                method: 'upi_qr',
+                status: 'pending',
+                razorpay_order_id: qrResult.qr_id,
+                platform_commission: split.commission_amount,
+                driver_earnings: split.driver_earnings,
+            });
+        }
+
+        order.payment_id = payment._id;
+        await order.save();
+
+        return res.status(200).json({
+            qr_id: qrResult.qr_id,
+            image_url: qrResult.image_url,
+            amount,
+            commission_amount: split.commission_amount,
+            driver_earnings: split.driver_earnings,
+            commission_percent: split.commission_percent,
+            payment_status: 'pending',
+            payment_id: payment._id,
+        });
+    } catch (error) {
+        console.error('[Payment] createDriverQR Error:', error.message);
+        return res.status(500).json({ error: error.message });
+    }
+};
+
+/**
+ * GET /api/payments/driver-qr/:orderId/status
+ * Poll QR payment status from Razorpay.
+ */
+const getDriverQRStatus = async (req, res) => {
+    const { orderId } = req.params;
+
+    try {
+        const order = await Order.findById(orderId);
+        if (!order) return res.status(404).json({ error: 'Order not found' });
+
+        if (!resolveDriverId(order, req.driver.id)) {
+            return res.status(403).json({ error: 'Not your order' });
+        }
+
+        if (order.payment_status === 'completed') {
+            const payment = await Payment.findOne({ order_id: String(order._id) });
+            return res.status(200).json({
+                payment_status: 'completed',
+                method: payment?.method || order.payment_method,
+                amount: payment?.amount || order.fare?.total,
+            });
+        }
+
+        const payment = await Payment.findOne({ order_id: String(order._id), method: 'upi_qr' });
+        if (!payment?.razorpay_order_id) {
+            return res.status(200).json({ payment_status: 'pending', qr_active: false });
+        }
+
+        const qrResult = await fetchQRCode(payment.razorpay_order_id);
+        if (!qrResult.success) {
+            return res.status(200).json({ payment_status: 'pending', qr_active: false });
+        }
+
+        const qr = qrResult.qr;
+        const expectedPaise = Math.round(Number(payment.amount) * 100);
+        const received = Number(qr.payments_amount_received) || 0;
+        const isPaid = received >= expectedPaise || qr.status === 'closed';
+
+        if (isPaid && payment.status !== 'completed') {
+            const io = req.app.get('io');
+            const result = await completeOrderPayment(order, 'upi_qr', {
+                razorpay_order_id: payment.razorpay_order_id,
+            }, io);
+            return res.status(200).json({
+                payment_status: 'completed',
+                method: 'upi_qr',
+                amount: result.payment?.amount,
+                driver_earnings: result.split?.driver_earnings,
+                commission_amount: result.split?.commission_amount,
+            });
+        }
+
+        return res.status(200).json({
+            payment_status: 'pending',
+            qr_active: qr.status === 'active',
+            amount_received: received / 100,
+            amount_expected: payment.amount,
+        });
+    } catch (error) {
+        console.error('[Payment] getDriverQRStatus Error:', error.message);
+        return res.status(500).json({ error: error.message });
+    }
+};
+
+/**
  * POST /api/payments/cash-collected
- * Mark cash payment as collected by driver
+ * Driver confirms cash received from customer.
  */
 const cashCollected = async (req, res) => {
     const { order_id } = req.body;
@@ -124,36 +279,101 @@ const cashCollected = async (req, res) => {
         const order = await Order.findById(order_id);
         if (!order) return res.status(404).json({ error: 'Order not found' });
 
-        if (order.payment_method !== 'cash') {
-            return res.status(400).json({ error: 'This is not a cash order' });
+        if (!resolveDriverId(order, req.driver.id)) {
+            return res.status(403).json({ error: 'Not your order' });
         }
 
-        // Create payment record for cash
-        const payment = await Payment.create({
-            order_id: order._id,
-            user_id: order.user_id,
-            driver_id: order.driver_id,
-            amount: order.fare.total,
-            method: 'cash',
-            status: 'completed',
-            platform_commission: order.fare.commission_amount,
-            driver_earnings: order.fare.driver_earnings,
+        if (!['in_transit', 'picked_up'].includes(order.status)) {
+            return res.status(400).json({ error: 'Collect payment during drop-off only' });
+        }
+
+        if (order.payment_status === 'completed') {
+            return res.status(200).json({ message: 'Payment already recorded', already_paid: true });
+        }
+
+        const io = req.app.get('io');
+        const result = await completeOrderPayment(order, 'cash', {}, io);
+        const split = result.split || splitFareCommission(order.fare?.total, order.fare?.commission_percent);
+
+        return res.status(200).json({
+            message: 'Cash payment recorded',
+            payment: result.payment,
+            amount: split.total,
+            commission_amount: split.commission_amount,
+            driver_earnings: split.driver_earnings,
+            payment_status: 'completed',
         });
+    } catch (error) {
+        console.error('[Payment] cashCollected Error:', error.message);
+        return res.status(500).json({ error: error.message });
+    }
+};
 
-        order.payment_status = 'completed';
-        order.payment_id = payment._id;
-        await order.save();
+/**
+ * GET /api/payments/order/:orderId/status
+ */
+const getOrderPaymentStatus = async (req, res) => {
+    try {
+        const order = await Order.findById(req.params.orderId);
+        if (!order) return res.status(404).json({ error: 'Order not found' });
 
-        return res.status(200).json({ message: 'Cash payment recorded', payment });
+        const payment = await Payment.findOne({ order_id: String(order._id) });
+        const fare = parseFare(order.fare);
+        const split = splitFareCommission(fare.total, fare.commission_percent || 15);
+
+        return res.status(200).json({
+            order_id: order._id,
+            payment_status: order.payment_status || 'pending',
+            payment_method: order.payment_method,
+            amount: split.total,
+            commission_amount: split.commission_amount,
+            driver_earnings: split.driver_earnings,
+            method: payment?.method || null,
+        });
     } catch (error) {
         return res.status(500).json({ error: error.message });
     }
 };
 
 /**
- * POST /api/payments/refund
- * Refund a payment (admin)
+ * POST /api/payments/webhook
+ * Razorpay webhook for QR payment capture.
  */
+const razorpayWebhook = async (req, res) => {
+    try {
+        const signature = req.headers['x-razorpay-signature'];
+        const rawBody = req.rawBody || JSON.stringify(req.body);
+
+        if (signature && !verifyWebhookSignature(rawBody, signature)) {
+            return res.status(400).json({ error: 'Invalid webhook signature' });
+        }
+
+        const event = req.body?.event;
+        const payload = req.body?.payload;
+
+        if (event === 'qr_code.credited' || event === 'payment.captured') {
+            const qrEntity = payload?.qr_code?.entity || payload?.payment?.entity;
+            const orderIdNote = qrEntity?.notes?.order_id
+                || payload?.payment?.entity?.notes?.order_id;
+
+            if (orderIdNote) {
+                const order = await Order.findById(orderIdNote);
+                if (order && order.payment_status !== 'completed') {
+                    const io = req.app.get('io');
+                    await completeOrderPayment(order, 'upi_qr', {
+                        razorpay_payment_id: payload?.payment?.entity?.id || '',
+                    }, io);
+                }
+            }
+        }
+
+        return res.status(200).json({ received: true });
+    } catch (error) {
+        console.error('[Payment] Webhook Error:', error.message);
+        return res.status(500).json({ error: error.message });
+    }
+};
+
 const processRefund = async (req, res) => {
     const { payment_id, reason } = req.body;
 
@@ -178,7 +398,6 @@ const processRefund = async (req, res) => {
         payment.refund_reason = reason || 'Admin initiated refund';
         await payment.save();
 
-        // Update order
         await Order.findByIdAndUpdate(payment.order_id, { payment_status: 'refunded' });
 
         return res.status(200).json({ message: 'Payment refunded', payment });
@@ -187,15 +406,9 @@ const processRefund = async (req, res) => {
     }
 };
 
-/**
- * GET /api/payments/order/:orderId
- * Get payment for a specific order
- */
 const getPaymentByOrder = async (req, res) => {
     try {
-        const payment = await Payment.findOne({ order_id: req.params.orderId })
-            .populate('user_id', 'name phone')
-            .populate('driver_id', 'name phone');
+        const payment = await Payment.findOne({ order_id: req.params.orderId });
 
         if (!payment) return res.status(404).json({ error: 'Payment not found' });
         return res.status(200).json(payment);
@@ -207,7 +420,11 @@ const getPaymentByOrder = async (req, res) => {
 module.exports = {
     createPaymentOrder,
     verifyPayment,
+    createDriverQR,
+    getDriverQRStatus,
     cashCollected,
+    getOrderPaymentStatus,
+    razorpayWebhook,
     processRefund,
     getPaymentByOrder,
 };

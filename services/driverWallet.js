@@ -32,6 +32,7 @@ const settleDriverWalletOnDelivery = async (order) => {
     const commissionPercent = split.commission_percent;
     const paymentMethod = order.payment_method || 'cash';
     const isCash = paymentMethod === 'cash';
+    // upi_qr / razorpay → credit net earnings to wallet
 
     const walletDelta = isCash ? -commissionAmount : driverEarnings;
 
@@ -57,7 +58,9 @@ const settleDriverWalletOnDelivery = async (order) => {
         balance_after: balanceAfter,
         note: isCash
             ? 'Cash collected from customer — platform commission deducted from wallet'
-            : 'Online payment — net earnings credited to wallet',
+            : paymentMethod === 'upi_qr'
+                ? 'UPI QR payment — net earnings credited to wallet'
+                : 'Online payment — net earnings credited to wallet',
     });
 
     return {

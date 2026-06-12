@@ -814,8 +814,11 @@ const updateOrderStatus = async (req, res) => {
             }
         }
 
-        // OTP verification for delivery
+        // OTP + payment verification for delivery
         if (status === 'delivered') {
+            if (order.payment_status !== 'completed') {
+                return res.status(400).json({ error: 'Collect payment before marking delivered' });
+            }
             if (!otp || otp !== order.delivery_otp) {
                 return res.status(400).json({ error: 'Invalid delivery OTP' });
             }
@@ -832,7 +835,6 @@ const updateOrderStatus = async (req, res) => {
         let walletSettlement = null;
 
         if (status === 'delivered') {
-            order.payment_status = order.payment_method === 'cash' ? 'completed' : order.payment_status;
             if (delivery_photo) order.delivery_photo = delivery_photo;
 
             await setDriverTripState(order.driver_id, { onTrip: false });
