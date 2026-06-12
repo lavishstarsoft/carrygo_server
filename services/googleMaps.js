@@ -30,6 +30,20 @@ const LOCAL_RADIUS_KM = 45;
 const AUTOCOMPLETE_CACHE_TTL_MS = 5 * 60 * 1000;
 const NOMINATIM_MIN_INTERVAL_MS = 1100;
 
+// When Google rejects requests (e.g. billing disabled), skip Google for a while
+// so every search doesn't pay a ~400ms failed round-trip before the fallback.
+const GOOGLE_DISABLED_BACKOFF_MS = 10 * 60 * 1000;
+let googleDisabledUntil = 0;
+
+const isGoogleUsable = () => Boolean(GOOGLE_MAPS_API_KEY) && Date.now() >= googleDisabledUntil;
+
+const markGoogleRejected = (status) => {
+    if (status === 'REQUEST_DENIED' || status === 'OVER_QUERY_LIMIT') {
+        googleDisabledUntil = Date.now() + GOOGLE_DISABLED_BACKOFF_MS;
+        console.warn(`[GoogleMaps] ${status} — skipping Google APIs for 10 minutes (fallback active)`);
+    }
+};
+
 const autocompleteCache = new Map();
 let lastNominatimRequestAt = 0;
 let nominatimQueue = Promise.resolve();
@@ -511,10 +525,45 @@ const getDirections = async (originLat, originLng, destLat, destLng) => {
 };
 
 /**
+ * Resolve a Google place_id to exact coordinates (Place Details API).
+ * Used when the user taps a Google autocomplete suggestion — more accurate
+ * and faster than re-geocoding the address text.
+ */
+const getPlaceDetails = async (placeId) => {
+    if (!isGoogleUsable()) {
+        return { success: false, error: 'Google Places unavailable' };
+    }
+    try {
+        const response = await axios.get('https://maps.googleapis.com/maps/api/place/details/json', {
+            params: {
+                place_id: placeId,
+                fields: 'geometry,formatted_address,name',
+                key: GOOGLE_MAPS_API_KEY,
+            },
+            timeout: 5000,
+        });
+        const data = response.data;
+        if (data.status === 'OK' && data.result?.geometry?.location) {
+            return {
+                success: true,
+                lat: data.result.geometry.location.lat,
+                lng: data.result.geometry.location.lng,
+                formatted_address: data.result.formatted_address || data.result.name,
+            };
+        }
+        markGoogleRejected(data.status);
+        return { success: false, error: data.status };
+    } catch (error) {
+        console.warn('[GoogleMaps] Place Details Error:', error.message);
+        return { success: false, error: error.message };
+    }
+};
+
+/**
  * Geocode an address to lat/lng
  */
 const geocodeAddress = async (address) => {
-    if (GOOGLE_MAPS_API_KEY) {
+    if (isGoogleUsable()) {
         try {
             const response = await axios.get('https://maps.googleapis.com/maps/api/geocode/json', {
                 params: {
@@ -522,6 +571,7 @@ const geocodeAddress = async (address) => {
                     key: GOOGLE_MAPS_API_KEY,
                     region: 'in',
                 },
+                timeout: 5000,
             });
 
             const data = response.data;
@@ -534,6 +584,7 @@ const geocodeAddress = async (address) => {
                     formatted_address: result.formatted_address,
                 };
             }
+            markGoogleRejected(data.status);
         } catch (error) {
             console.warn('[GoogleMaps] Geocode fallback:', error.message);
         }
@@ -639,7 +690,7 @@ const getAutocompleteSuggestions = async (input, options = {}) => {
         return payload;
     };
 
-    if (GOOGLE_MAPS_API_KEY) {
+    if (isGoogleUsable()) {
         try {
             // Use the raw user input (not city-appended) so Google returns ALL matching
             // places across India — like Google Maps / Rapido / Uber search.
@@ -657,7 +708,10 @@ const getAutocompleteSuggestions = async (input, options = {}) => {
                 params.radius = 50000;
             }
 
-            const response = await axios.get('https://maps.googleapis.com/maps/api/place/autocomplete/json', { params });
+            const response = await axios.get('https://maps.googleapis.com/maps/api/place/autocomplete/json', {
+                params,
+                timeout: 5000,
+            });
             const data = response.data;
 
             if (data.status === 'OK') {
@@ -677,6 +731,7 @@ const getAutocompleteSuggestions = async (input, options = {}) => {
                 return finish([], 'google');
             }
 
+            markGoogleRejected(data.status);
             console.warn('[GoogleMaps] Autocomplete fallback:', data.status);
         } catch (error) {
             console.warn('[GoogleMaps] Autocomplete fallback:', error.message);
@@ -720,6 +775,7 @@ module.exports = {
     getDistanceAndDuration,
     getDirections,
     geocodeAddress,
+    getPlaceDetails,
     reverseGeocode,
     getAutocompleteSuggestions,
 };

@@ -1,6 +1,6 @@
 const Pricing = require('../models/Pricing');
 const DeliveryZone = require('../models/DeliveryZone');
-const { getDistanceAndDuration, reverseGeocode, geocodeAddress, getAutocompleteSuggestions } = require('../services/googleMaps');
+const { getDistanceAndDuration, reverseGeocode, geocodeAddress, getPlaceDetails, getAutocompleteSuggestions } = require('../services/googleMaps');
 const { computeTripFare } = require('../services/fareCalculation');
 
 // ─── Geometry Helpers ────────────────────────────────────────────────────────
@@ -330,6 +330,23 @@ const geocode = async (req, res) => {
 };
 
 /**
+ * GET /api/fare/place-details
+ * Resolve a Google place_id to exact lat/lng (after suggestion tap)
+ */
+const placeDetails = async (req, res) => {
+    const { place_id } = req.query;
+    if (!place_id) return res.status(400).json({ error: 'place_id is required' });
+
+    try {
+        const result = await getPlaceDetails(place_id);
+        if (!result.success) return res.status(400).json({ error: result.error });
+        return res.status(200).json(result);
+    } catch (error) {
+        return res.status(500).json({ error: error.message });
+    }
+};
+
+/**
  * GET /api/fare/autocomplete
  * Get address suggestions from Google Places
  */
@@ -397,6 +414,7 @@ module.exports = {
     toggleSurge,
     deletePricing,
     geocode,
+    placeDetails,
     autocomplete,
     getZones,
     upsertZone,

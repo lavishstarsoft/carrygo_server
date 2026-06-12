@@ -5,6 +5,7 @@ const fareController = require('../controllers/fareController');
 // Public — fare estimate (user app uses this)
 router.post('/estimate', fareController.estimateFare);
 router.get('/geocode', fareController.geocode);
+router.get('/place-details', fareController.placeDetails);
 router.get('/autocomplete', fareController.autocomplete);
 
 // Admin — pricing & zone management
