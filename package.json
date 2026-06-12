@@ -8,6 +8,7 @@
     "dev": "node --watch index.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "migrate:setup": "node scripts/apply-schema.js",
+    "migrate:file": "node scripts/apply-migration-file.js",
     "migrate:dry-run": "node scripts/migrate-mongo-to-supabase.js --dry-run",
     "migrate:supabase": "node scripts/migrate-mongo-to-supabase.js",
     "migrate:verify": "node scripts/verify-migration.js",

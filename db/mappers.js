@@ -238,7 +238,6 @@ const otpToRow = (doc) => ({
     otp: doc.otp,
     expires_at: doc.expiresAt ? new Date(doc.expiresAt).toISOString() : new Date(Date.now() + 300000).toISOString(),
     created_at: doc.createdAt ? new Date(doc.createdAt).toISOString() : new Date().toISOString(),
-    updated_at: doc.updatedAt ? new Date(doc.updatedAt).toISOString() : new Date().toISOString(),
 });
 
 const settingToRow = (doc) => {

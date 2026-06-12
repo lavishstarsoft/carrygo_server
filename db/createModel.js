@@ -35,7 +35,8 @@ class Document {
         if (this._hooks.preSave) await this._hooks.preSave(this);
         const toRow = TO_ROW[this._table];
         const row = toRow(this.toObject());
-        row.updated_at = new Date().toISOString();
+        // otps table may not have updated_at until migration is applied
+        if (this._table !== 'otps') row.updated_at = new Date().toISOString();
         if (!row.id) {
             row.id = newId();
             this._id = row.id;
@@ -337,7 +338,7 @@ function createModel(table, hooks = {}) {
             const row = toRow(draft.toObject());
             row.id = id;
             if (!row.created_at) row.created_at = now.toISOString();
-            row.updated_at = now.toISOString();
+            if (table !== 'otps') row.updated_at = now.toISOString();
             const supabase = getSupabaseAdmin();
             const { data: inserted, error } = await supabase.from(table).insert(row).select().single();
             if (error) throw new Error(`[${table}] create: ${error.message}`);
