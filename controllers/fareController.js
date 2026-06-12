@@ -409,6 +409,8 @@ const deleteZone = async (req, res) => {
 
 module.exports = {
     estimateFare,
+    findZoneForPoint,
+    findPricingForTrip,
     getAllPricing,
     upsertPricing,
     toggleSurge,

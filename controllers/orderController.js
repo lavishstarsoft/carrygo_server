@@ -15,6 +15,7 @@ const { registerSearchingReconcile } = require('../services/productionJobs');
 const WalletTransaction = require('../models/WalletTransaction');
 const { settleDriverWalletOnDelivery } = require('../services/driverWallet');
 const { computeTripFare, splitFareCommission } = require('../services/fareCalculation');
+const { findZoneForPoint, findPricingForTrip } = require('./fareController');
 
 // ─── Dispatch Helpers (Rapido-style one-by-one) ──────────────────────────
 const OFFER_TTL_MS = parseInt(process.env.DRIVER_OFFER_TTL_MS || '30000', 10); // 30s per driver
@@ -241,11 +242,10 @@ const calculateFare = async (pickup, dropoff, vehicle_type, vehicle_body_type) =
     const geoResult = await reverseGeocode(pickup.lat, pickup.lng);
     const city = geoResult.success ? geoResult.city : 'default';
 
-    let pricing = await Pricing.findOne({
-        city: { $regex: new RegExp(`^${city}$`, 'i') },
-        vehicle_type,
-        active: true,
-    });
+    // Same zone-aware lookup as the fare estimate endpoint:
+    // zone pricing → city pricing → default pricing → any active pricing.
+    const zone = await findZoneForPoint(pickup.lat, pickup.lng);
+    const pricing = await findPricingForTrip({ zone, city, vehicle_type, vehicle_body_type });
 
     if (!pricing) {
         const error = new Error("We aren't in your area yet. Our team is working hard to expand our reach—stay tuned, we're coming soon!");
