@@ -120,8 +120,13 @@ const createUPIQRCode = async (amount, orderId, notes = {}) => {
             status: qr.status,
         };
     } catch (error) {
-        console.error('[Razorpay] Create QR Error:', error.message);
-        return { success: false, error: error.message };
+        const detail = error?.error?.description
+            || error?.error?.reason
+            || error?.description
+            || error?.message
+            || 'Unknown Razorpay QR error';
+        console.error('[Razorpay] Create QR Error:', detail, error?.error || '');
+        return { success: false, error: detail };
     }
 };
 
@@ -179,8 +184,13 @@ const createPaymentLinkQR = async (amount, orderId, notes = {}) => {
             status: link.status || 'created',
         };
     } catch (error) {
-        console.error('[Razorpay] Payment Link QR Error:', error.message);
-        return { success: false, error: error.message };
+        const detail = error?.error?.description
+            || error?.error?.reason
+            || error?.description
+            || error?.message
+            || 'Unknown Payment Link error';
+        console.error('[Razorpay] Payment Link QR Error:', detail, error?.error || '');
+        return { success: false, error: detail };
     }
 };
 
