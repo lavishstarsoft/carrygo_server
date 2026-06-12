@@ -145,6 +145,7 @@ const createDriverQR = async (req, res) => {
                 return res.status(200).json({
                     qr_id: existingQr.qr.id,
                     image_url: existingQr.qr.image_url,
+                    image_content: existingQr.qr.image_content,
                     amount,
                     commission_amount: split.commission_amount,
                     driver_earnings: split.driver_earnings,
@@ -159,7 +160,15 @@ const createDriverQR = async (req, res) => {
         });
 
         if (!qrResult.success) {
-            return res.status(500).json({ error: qrResult.error || 'Failed to create QR code' });
+            const msg = qrResult.error || 'Failed to create QR code';
+            const hint = /authentication|key|secret/i.test(msg)
+                ? 'Check RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET on server'
+                : /qr|feature|not enabled/i.test(msg)
+                    ? 'Enable QR Codes in Razorpay Dashboard'
+                    : null;
+            return res.status(500).json({
+                error: hint ? `${msg}. ${hint}` : msg,
+            });
         }
 
         if (payment) {
@@ -190,6 +199,7 @@ const createDriverQR = async (req, res) => {
         return res.status(200).json({
             qr_id: qrResult.qr_id,
             image_url: qrResult.image_url,
+            image_content: qrResult.image_content,
             amount,
             commission_amount: split.commission_amount,
             driver_earnings: split.driver_earnings,

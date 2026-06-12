@@ -41,11 +41,15 @@ const sendPushNotification = async (recipientId, recipientModel, title, body, da
             }
         };
 
-        const response = await axios.post('https://onesignal.com/api/v1/notifications', payload, {
+        const authHeader = onesignalApiKey.startsWith('Key ')
+            ? onesignalApiKey
+            : `Key ${onesignalApiKey}`;
+
+        const response = await axios.post('https://api.onesignal.com/notifications', payload, {
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Basic ${onesignalApiKey}`
-            }
+                'Authorization': authHeader,
+            },
         });
 
         console.log('[PushService] OneSignal response:', response.data);

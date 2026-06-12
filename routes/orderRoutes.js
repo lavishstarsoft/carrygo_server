@@ -15,6 +15,7 @@ router.get('/route', orderController.getRoute);
 // ─── Driver Routes ────────────────────────────────────────────
 router.post('/accept', driverAuth, orderController.acceptOrder);
 router.post('/reject', driverAuth, orderController.rejectOrder);
+router.post('/:id/verify-delivery-otp', driverAuth, orderController.verifyDeliveryOtp);
 router.put('/:id/status', driverAuth, orderController.updateOrderStatus);
 router.get('/driver-orders', driverAuth, orderController.getDriverOrders);
 router.get('/driver-active', driverAuth, orderController.getActiveOrder);

@@ -735,6 +735,33 @@ const rejectOrder = async (req, res) => {
     }
 };
 
+// ─── VERIFY DELIVERY OTP (Driver — before payment collection) ─
+const verifyDeliveryOtp = async (req, res) => {
+    const { id } = req.params;
+    const { otp } = req.body;
+
+    try {
+        const order = await Order.findById(id);
+        if (!order) return res.status(404).json({ error: 'Order not found' });
+
+        if (String(order.driver_id?._id || order.driver_id) !== String(req.driver.id)) {
+            return res.status(403).json({ error: 'Not your order' });
+        }
+
+        if (order.status !== 'in_transit') {
+            return res.status(400).json({ error: 'OTP verification only during delivery' });
+        }
+
+        if (!otp || otp !== order.delivery_otp) {
+            return res.status(400).json({ error: 'Invalid delivery OTP' });
+        }
+
+        return res.status(200).json({ verified: true });
+    } catch (error) {
+        return res.status(500).json({ error: error.message });
+    }
+};
+
 // ─── UPDATE ORDER STATUS (Driver) ────────────────────────────
 const updateOrderStatus = async (req, res) => {
     const { id } = req.params;
@@ -1414,6 +1441,7 @@ module.exports = {
     createBooking,
     acceptOrder,
     rejectOrder,
+    verifyDeliveryOtp,
     updateOrderStatus,
     cancelOrder,
     rateOrder,
