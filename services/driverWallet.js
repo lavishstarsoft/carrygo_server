@@ -32,7 +32,7 @@ const settleDriverWalletOnDelivery = async (order) => {
     const commissionPercent = split.commission_percent;
     const paymentMethod = order.payment_method || 'cash';
     const isCash = paymentMethod === 'cash';
-    // upi_qr / razorpay → credit net earnings to wallet
+    // upi_qr / payment_link / razorpay → credit net earnings to wallet
 
     const walletDelta = isCash ? -commissionAmount : driverEarnings;
 
