@@ -337,7 +337,7 @@ function createModel(table, hooks = {}) {
             const row = toRow(draft.toObject());
             row.id = id;
             if (!row.created_at) row.created_at = now.toISOString();
-            if (table !== 'otps') row.updated_at = now.toISOString();
+            row.updated_at = now.toISOString();
             const supabase = getSupabaseAdmin();
             const { data: inserted, error } = await supabase.from(table).insert(row).select().single();
             if (error) throw new Error(`[${table}] create: ${error.message}`);

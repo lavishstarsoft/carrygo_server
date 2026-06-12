@@ -279,7 +279,8 @@ CREATE TABLE IF NOT EXISTS otps (
     phone       TEXT NOT NULL,
     otp         TEXT NOT NULL,
     expires_at  TIMESTAMPTZ NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_otps_phone ON otps (phone);
 CREATE INDEX IF NOT EXISTS idx_otps_expires ON otps (expires_at);
@@ -308,7 +309,7 @@ DO $$
 DECLARE
     t TEXT;
 BEGIN
-    FOREACH t IN ARRAY ARRAY['admins','settings','delivery_zones','users','drivers','pricings','orders','payments','wallet_transactions']
+    FOREACH t IN ARRAY ARRAY['admins','settings','delivery_zones','users','drivers','pricings','orders','payments','wallet_transactions','otps']
     LOOP
         EXECUTE format('
             DROP TRIGGER IF EXISTS trg_%s_updated_at ON %I;
