@@ -2,6 +2,7 @@ const Driver = require('../models/Driver');
 const Otp = require('../models/Otp');
 const jwt = require('jsonwebtoken');
 const { sendOTP } = require('../services/msg91');
+const { OTP_EXPIRY_MS, assertCanSendOtp } = require('../services/otpSendGuard');
 
 // POST /api/driver-auth/send-otp
 const sendDriverOTP = async (req, res) => {
@@ -12,16 +13,23 @@ const sendDriverOTP = async (req, res) => {
     }
 
     try {
-        // Generate 6-digit OTP locally
+        const guard = await assertCanSendOtp(phone);
+        if (!guard.ok) {
+            return res.status(guard.status).json({
+                error: guard.error,
+                retry_after: guard.retry_after,
+                code: guard.code,
+            });
+        }
+
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
-        // Store OTP in MongoDB (upsert — replaces old OTP for same phone)
         await Otp.findOneAndUpdate(
             { phone },
             {
                 phone,
                 otp,
-                expiresAt: new Date(Date.now() + 5 * 60 * 1000) // 5 minutes
+                expiresAt: new Date(Date.now() + OTP_EXPIRY_MS),
             },
             { upsert: true, new: true }
         );

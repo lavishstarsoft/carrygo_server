@@ -2,6 +2,7 @@ const User = require('../models/User');
 const Otp = require('../models/Otp');
 const jwt = require('jsonwebtoken');
 const { sendOTP } = require('../services/msg91');
+const { OTP_EXPIRY_MS, assertCanSendOtp } = require('../services/otpSendGuard');
 
 // POST /api/user-auth/send-otp
 const sendUserOTP = async (req, res) => {
@@ -12,6 +13,15 @@ const sendUserOTP = async (req, res) => {
     }
 
     try {
+        const guard = await assertCanSendOtp(phone);
+        if (!guard.ok) {
+            return res.status(guard.status).json({
+                error: guard.error,
+                retry_after: guard.retry_after,
+                code: guard.code,
+            });
+        }
+
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
         await Otp.findOneAndUpdate(
@@ -19,7 +29,7 @@ const sendUserOTP = async (req, res) => {
             {
                 phone,
                 otp,
-                expiresAt: new Date(Date.now() + 5 * 60 * 1000)
+                expiresAt: new Date(Date.now() + OTP_EXPIRY_MS),
             },
             { upsert: true, new: true }
         );
