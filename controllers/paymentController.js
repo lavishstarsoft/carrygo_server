@@ -2,10 +2,8 @@ const Payment = require('../models/Payment');
 const Order = require('../models/Order');
 const {
     createRazorpayOrder,
-    createDriverCollectionQR,
     fetchQRCode,
     fetchPaymentLink,
-    qrImageFromPaymentLink,
     verifyPaymentSignature,
     verifyWebhookSignature,
     refundPayment,
@@ -14,6 +12,10 @@ const {
 const DRIVER_QR_METHODS = ['upi_qr', 'payment_link'];
 const { completeOrderPayment, parseFare } = require('../services/paymentCollection');
 const { splitFareCommission } = require('../services/fareCalculation');
+const {
+    DRIVER_QR_PREPARE_STATUSES,
+    ensureDriverCollectionQR,
+} = require('../services/driverQrService');
 
 const resolveDriverId = (order, reqDriverId) => {
     const assigned = String(order.driver_id?._id || order.driver_id || '');
@@ -121,70 +123,14 @@ const createDriverQR = async (req, res) => {
             return res.status(403).json({ error: 'Not your order' });
         }
 
-        if (!['in_transit', 'picked_up'].includes(order.status)) {
-            return res.status(400).json({ error: 'QR available only during drop-off phase' });
+        if (!DRIVER_QR_PREPARE_STATUSES.includes(order.status)) {
+            return res.status(400).json({ error: 'QR not available for this order status' });
         }
 
-        if (order.payment_status === 'completed') {
-            return res.status(200).json({
-                already_paid: true,
-                payment_status: 'completed',
-                amount: order.fare?.total,
-            });
-        }
+        const result = await ensureDriverCollectionQR(orderId);
 
-        const fare = parseFare(order.fare);
-        const split = splitFareCommission(fare.total, fare.commission_percent || 15);
-        const amount = split.total;
-
-        if (!amount || amount <= 0) {
-            return res.status(400).json({ error: 'Invalid fare amount' });
-        }
-
-        let payment = await Payment.findOne({ order_id: String(order._id) });
-
-        if (payment?.status === 'pending' && payment.razorpay_order_id && DRIVER_QR_METHODS.includes(payment.method)) {
-            if (payment.method === 'upi_qr') {
-                const existingQr = await fetchQRCode(payment.razorpay_order_id);
-                if (existingQr.success && existingQr.qr?.status === 'active') {
-                    return res.status(200).json({
-                        qr_id: existingQr.qr.id,
-                        image_url: existingQr.qr.image_url,
-                        image_content: existingQr.qr.image_content,
-                        method: 'upi_qr',
-                        amount,
-                        commission_amount: split.commission_amount,
-                        driver_earnings: split.driver_earnings,
-                        payment_status: 'pending',
-                        payment_id: payment._id,
-                    });
-                }
-            } else if (payment.method === 'payment_link') {
-                const existingLink = await fetchPaymentLink(payment.razorpay_order_id);
-                if (existingLink.success && existingLink.link?.status !== 'paid') {
-                    const imageContent = await qrImageFromPaymentLink(existingLink.link.short_url);
-                    return res.status(200).json({
-                        qr_id: existingLink.link.id,
-                        short_url: existingLink.link.short_url,
-                        image_url: null,
-                        image_content: imageContent,
-                        method: 'payment_link',
-                        amount,
-                        commission_amount: split.commission_amount,
-                        driver_earnings: split.driver_earnings,
-                        payment_status: 'pending',
-                        payment_id: payment._id,
-                    });
-                }
-            }
-        }
-
-        const qrResult = await createDriverCollectionQR(amount, order._id, {
-            order_number: order.order_number,
-        });
-
-        if (!qrResult.success) {
-            const msg = qrResult.error || 'Failed to create payment QR';
+        if (!result.success) {
+            const msg = result.error || 'Failed to create payment QR';
             const hint = /authentication|key|secret/i.test(msg)
                 ? 'Check RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET on server'
                 : null;
@@ -193,46 +139,15 @@ const createDriverQR = async (req, res) => {
             });
         }
 
-        const collectionMethod = qrResult.method || 'upi_qr';
-
-        if (payment) {
-            payment.amount = amount;
-            payment.method = collectionMethod;
-            payment.status = 'pending';
-            payment.razorpay_order_id = qrResult.qr_id;
-            payment.platform_commission = split.commission_amount;
-            payment.driver_earnings = split.driver_earnings;
-            await payment.save();
-        } else {
-            payment = await Payment.create({
-                order_id: order._id,
-                user_id: order.user_id,
-                driver_id: order.driver_id,
-                amount,
-                method: collectionMethod,
-                status: 'pending',
-                razorpay_order_id: qrResult.qr_id,
-                platform_commission: split.commission_amount,
-                driver_earnings: split.driver_earnings,
+        if (result.already_paid) {
+            return res.status(200).json({
+                already_paid: true,
+                payment_status: 'completed',
+                amount: result.amount,
             });
         }
 
-        order.payment_id = payment._id;
-        await order.save();
-
-        return res.status(200).json({
-            qr_id: qrResult.qr_id,
-            short_url: qrResult.short_url || null,
-            image_url: qrResult.image_url,
-            image_content: qrResult.image_content,
-            method: collectionMethod,
-            amount,
-            commission_amount: split.commission_amount,
-            driver_earnings: split.driver_earnings,
-            commission_percent: split.commission_percent,
-            payment_status: 'pending',
-            payment_id: payment._id,
-        });
+        return res.status(200).json(result);
     } catch (error) {
         console.error('[Payment] createDriverQR Error:', error.message);
         return res.status(500).json({ error: error.message });

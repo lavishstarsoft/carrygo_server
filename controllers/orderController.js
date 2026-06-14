@@ -14,6 +14,7 @@ const {
 const { registerSearchingReconcile } = require('../services/productionJobs');
 const WalletTransaction = require('../models/WalletTransaction');
 const { settleDriverWalletOnDelivery } = require('../services/driverWallet');
+const { preloadDriverCollectionQR } = require('../services/driverQrService');
 const { computeTripFare, splitFareCommission } = require('../services/fareCalculation');
 const { findZoneForPoint, findPricingForTrip } = require('./fareController');
 
@@ -717,6 +718,9 @@ const acceptOrder = async (req, res) => {
         await order.save();
 
         await setDriverTripState(driver_id, { onTrip: true, orderId: order._id });
+
+        // Pre-generate payment QR so it is ready instantly at delivery (non-blocking)
+        preloadDriverCollectionQR(order._id);
 
         // Get driver details for user notification
         const driver = await Driver.findById(driver_id).select('name phone vehicle_type vehicle_number average_rating location');
