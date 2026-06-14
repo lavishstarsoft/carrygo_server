@@ -34,6 +34,7 @@ const docFields = [
 ];
 
 // Public routes
+router.get('/fleet/live', driverController.getFleetLive);
 router.get('/', driverController.getAllDrivers);
 router.post('/', driverController.createDriver);
 router.get('/:id', driverController.getDriverById);

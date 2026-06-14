@@ -98,6 +98,9 @@ const emitOfferToDriver = async (io, driverId, payload) => {
     } catch (err) {
         console.error('[emitOfferToDriver] Error sending push notification:', err);
     }
+
+    const { emitAdminFleetPulse } = require('../services/adminFleetPulse');
+    emitAdminFleetPulse(io, 'offer');
 };
 
 
@@ -751,6 +754,8 @@ const acceptOrder = async (req, res) => {
                 status: 'accepted',
                 driver_name: driver.name,
             });
+            const { emitAdminFleetPulse } = require('../services/adminFleetPulse');
+            emitAdminFleetPulse(io, 'accepted');
         }
 
         return res.status(200).json({ order, driver });

@@ -84,6 +84,12 @@ io.on('connection', (socket) => {
     console.log(`User ${userId} joined room`);
   });
 
+  // Admin dashboard joins for live fleet ops
+  socket.on('join_admin', () => {
+    socket.join('admin_room');
+    console.log(`Admin joined fleet room (${socket.id})`);
+  });
+
   // Driver location update (real-time)
   socket.on('driver_location_update', (data) => {
     const { driver_id, latitude, longitude, order_id, heading } = data;
@@ -98,6 +104,14 @@ io.on('connection', (socket) => {
       latitude, 
       longitude, 
       vehicle_type: data.vehicle_type 
+    });
+
+    io.to('admin_room').emit('admin_driver_location', {
+      driver_id: String(driver_id || ''),
+      latitude,
+      longitude,
+      vehicle_type: data.vehicle_type,
+      at: new Date().toISOString(),
     });
   });
 

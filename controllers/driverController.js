@@ -1,10 +1,106 @@
 const Driver = require('../models/Driver');
+const Order = require('../models/Order');
 const Notification = require('../models/Notification');
 const path = require('path');
 const {
     syncDriverGeoIndex,
     releaseStaleDriverTripState,
 } = require('../services/driverAvailability');
+const { emitAdminFleetPulse } = require('../services/adminFleetPulse');
+
+const offerExpiresMs = (value) => {
+    if (!value) return 0;
+    return new Date(value).getTime();
+};
+
+const resolveOpsStatus = (driver, offer, trip) => {
+    if (driver.is_blocked) return 'blocked';
+    if (!driver.is_active) return 'offline';
+    if (offer) return 'alert';
+    if (driver.is_on_trip || trip) return 'on_trip';
+    return 'idle';
+};
+
+const getFleetLive = async (req, res) => {
+    try {
+        const drivers = await Driver.find({});
+        const now = Date.now();
+
+        const searchingOrders = await Order.find({ status: 'searching' });
+        const activeTrips = await Order.find({
+            status: { $in: ['accepted', 'driver_arrived', 'picked_up', 'in_transit'] },
+        });
+
+        const offersByDriver = {};
+        for (const order of searchingOrders) {
+            const driverId = String(order.offered_driver_id?._id || order.offered_driver_id || '');
+            if (!driverId) continue;
+            const expiresAt = offerExpiresMs(order.offer_expires_at);
+            if (expiresAt && expiresAt <= now) continue;
+            offersByDriver[driverId] = {
+                order_id: String(order._id),
+                order_number: order.order_number,
+                expires_at: order.offer_expires_at,
+                pickup_address: order.pickup?.address || '',
+                dropoff_address: order.dropoff?.address || '',
+                fare_total: order.fare?.total,
+                seconds_left: expiresAt ? Math.max(0, Math.round((expiresAt - now) / 1000)) : null,
+            };
+        }
+
+        const tripsByDriver = {};
+        for (const order of activeTrips) {
+            const driverId = String(order.driver_id?._id || order.driver_id || '');
+            if (!driverId) continue;
+            tripsByDriver[driverId] = {
+                order_id: String(order._id),
+                order_number: order.order_number,
+                status: order.status,
+                pickup_address: order.pickup?.address || '',
+                dropoff_address: order.dropoff?.address || '',
+                fare_total: order.fare?.total,
+                payment_status: order.payment_status,
+            };
+        }
+
+        const fleet = drivers.map((driver) => {
+            const raw = driver.toObject ? driver.toObject() : { ...driver };
+            const id = String(raw._id);
+            const coords = raw.location?.coordinates;
+            const lat = Number.isFinite(coords?.[1]) ? coords[1] : (raw.latitude ?? null);
+            const lng = Number.isFinite(coords?.[0]) ? coords[0] : (raw.longitude ?? null);
+            const liveOffer = offersByDriver[id] || null;
+            const activeTrip = tripsByDriver[id] || null;
+
+            return {
+                ...raw,
+                latitude: lat,
+                longitude: lng,
+                ops_status: resolveOpsStatus(raw, liveOffer, activeTrip),
+                live_offer: liveOffer,
+                active_trip: activeTrip,
+                location_updated_at: raw.updatedAt || raw.updated_at || null,
+            };
+        });
+
+        return res.status(200).json({
+            fleet,
+            summary: {
+                total: fleet.length,
+                online: fleet.filter((d) => d.is_active && !d.is_blocked).length,
+                idle: fleet.filter((d) => d.ops_status === 'idle').length,
+                on_trip: fleet.filter((d) => d.ops_status === 'on_trip').length,
+                alert: fleet.filter((d) => d.ops_status === 'alert').length,
+                offline: fleet.filter((d) => d.ops_status === 'offline').length,
+                blocked: fleet.filter((d) => d.ops_status === 'blocked').length,
+            },
+            updated_at: new Date().toISOString(),
+        });
+    } catch (error) {
+        console.error('[Fleet] getFleetLive Error:', error.message);
+        return res.status(500).json({ error: error.message });
+    }
+};
 
 const getAllDrivers = async (req, res) => {
     try {
@@ -133,6 +229,20 @@ const updateDriverLocation = async (req, res) => {
                     driver_id: id,
                 });
             }
+        }
+
+        const io = req.app.get('io');
+        if (io) {
+            io.to('admin_room').emit('admin_driver_location', {
+                driver_id: String(id),
+                latitude,
+                longitude,
+                is_active: data.is_active,
+                is_on_trip: data.is_on_trip,
+                vehicle_type: data.vehicle_type,
+                at: new Date().toISOString(),
+            });
+            emitAdminFleetPulse(io, 'location');
         }
 
         return res.status(200).json(data);
@@ -740,6 +850,7 @@ const uploadSelfie = async (req, res) => {
 
 module.exports = {
     getAllDrivers,
+    getFleetLive,
     getDriverById,
     createDriver,
     updateDriver,
