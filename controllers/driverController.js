@@ -41,7 +41,14 @@ const updateDriver = async (req, res) => {
             if (req.body.is_active === true) {
                 await releaseStaleDriverTripState(id);
                 const refreshed = await Driver.findById(id);
-                if (refreshed) await syncDriverGeoIndex(refreshed);
+                if (refreshed) {
+                    await syncDriverGeoIndex(refreshed);
+                    const io = req.app.get('io');
+                    if (io) {
+                        const { wakeSearchingOrdersNearDriver } = require('./orderController');
+                        await wakeSearchingOrdersNearDriver(refreshed, io, { force: true });
+                    }
+                }
             } else {
                 await syncDriverGeoIndex(data);
             }
@@ -107,6 +114,14 @@ const updateDriverLocation = async (req, res) => {
         }
 
         await syncDriverGeoIndex(data);
+
+        if (data.is_active) {
+            const io = req.app.get('io');
+            if (io) {
+                const { wakeSearchingOrdersNearDriver } = require('./orderController');
+                await wakeSearchingOrdersNearDriver(data, io);
+            }
+        }
 
         // Emit real-time location if driver is on a trip
         if (data.is_on_trip && data.current_order_id) {

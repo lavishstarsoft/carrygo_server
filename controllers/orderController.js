@@ -20,7 +20,10 @@ const { findZoneForPoint, findPricingForTrip } = require('./fareController');
 // ─── Dispatch Helpers (Rapido-style one-by-one) ──────────────────────────
 const OFFER_TTL_MS = parseInt(process.env.DRIVER_OFFER_TTL_MS || '30000', 10); // 30s per driver
 const DISPATCH_RETRY_COOLDOWN_MS = 30000;
+const DISPATCH_RADIUS_KM = parseInt(process.env.DISPATCH_RADIUS_KM || '15', 10);
 const lastDispatchRetryRef = new Map();
+const lastDriverWakeRef = new Map();
+const DRIVER_WAKE_COOLDOWN_MS = 60000;
 
 const offerExpiresMs = (value) => {
     if (!value) return 0;
@@ -73,6 +76,7 @@ const emitOfferToDriver = async (io, driverId, payload) => {
 
     io.to(`driver_${id}`).emit('new_order', enriched);
     io.emit(`new_order_${id}`, enriched);
+    console.log(`📡 [Dispatch] Offer sent to driver ${id} for order ${enriched.order_id}`);
 
     try {
         const { sendPushNotification } = require('../services/pushNotification');
@@ -344,7 +348,7 @@ const createBooking = async (req, res) => {
             await releaseStaleTripStateNearPickup(pickup.lat, pickup.lng, 15);
 
             // Find nearby available drivers
-            const nearbyDrivers = await findNearbyDrivers(pickup.lat, pickup.lng, vehicle_type, 10);
+            const nearbyDrivers = await findNearbyDrivers(pickup.lat, pickup.lng, vehicle_type, DISPATCH_RADIUS_KM);
             
             // Store candidates (nearest-first) and start sequential offers
             console.log(`📡 [Booking] Dispatch candidates: ${nearbyDrivers.length} drivers (sequential)...`);
@@ -418,7 +422,8 @@ const createBooking = async (req, res) => {
     }
 };
 
-const reconcileSearchingOrderDispatch = async (order, io) => {
+const reconcileSearchingOrderDispatch = async (order, io, options = {}) => {
+    const { force = false } = options;
     if (!order || order.status !== 'searching' || !io || !order.pickup?.lat || !order.pickup?.lng) {
         return order;
     }
@@ -428,44 +433,96 @@ const reconcileSearchingOrderDispatch = async (order, io) => {
         && offerExpiresMs(order.offer_expires_at) > Date.now();
     if (hasLiveOffer) return order;
 
-    const candidates = order.dispatch_candidate_driver_ids || [];
-    const needsRetry = candidates.length === 0 || !order.offered_driver_id;
-    if (!needsRetry) return order;
-
     const key = String(order._id);
-    const lastRetry = lastDispatchRetryRef.get(key) || 0;
-    if (Date.now() - lastRetry < DISPATCH_RETRY_COOLDOWN_MS) return order;
+    if (!force) {
+        const lastRetry = lastDispatchRetryRef.get(key) || 0;
+        if (Date.now() - lastRetry < DISPATCH_RETRY_COOLDOWN_MS) return order;
+    }
     lastDispatchRetryRef.set(key, Date.now());
 
-    await releaseStaleTripStateNearPickup(order.pickup.lat, order.pickup.lng, 15);
-    const nearbyDrivers = await findNearbyDrivers(
-        order.pickup.lat,
-        order.pickup.lng,
-        order.vehicle_type,
-        10,
-    );
-
-    if (nearbyDrivers.length === 0) {
-        console.log(`⚠️ [reconcileDispatch] No drivers for order ${key}`);
-        return order;
+    // Clear expired offer so dispatch can continue
+    if (order.offered_driver_id) {
+        order.offered_driver_id = undefined;
+        order.offer_expires_at = undefined;
     }
 
-    order.dispatch_candidate_driver_ids = nearbyDrivers.map((d) => d._id);
-    order.dispatch_cursor = 0;
-    order.offered_driver_id = undefined;
-    order.offer_expires_at = undefined;
-    order.offer_attempt = 0;
-    order.timeline.push({
-        status: 'searching',
-        timestamp: new Date(),
-        note: 'Re-dispatching after refreshing nearby drivers.',
-    });
-    await order.save();
-    await dispatchNextDriver(order._id, io, 'Re-dispatch retry.');
+    const candidates = order.dispatch_candidate_driver_ids || [];
+    const cursor = order.dispatch_cursor || 0;
+    const exhausted = candidates.length === 0 || cursor >= candidates.length;
+
+    if (exhausted) {
+        await releaseStaleTripStateNearPickup(order.pickup.lat, order.pickup.lng, DISPATCH_RADIUS_KM);
+        const nearbyDrivers = await findNearbyDrivers(
+            order.pickup.lat,
+            order.pickup.lng,
+            order.vehicle_type,
+            DISPATCH_RADIUS_KM,
+        );
+
+        if (nearbyDrivers.length === 0) {
+            console.log(`⚠️ [reconcileDispatch] No drivers for order ${key}`);
+            await order.save();
+            return order;
+        }
+
+        order.dispatch_candidate_driver_ids = nearbyDrivers.map((d) => d._id);
+        order.dispatch_cursor = 0;
+        order.offer_attempt = 0;
+        order.timeline.push({
+            status: 'searching',
+            timestamp: new Date(),
+            note: 'Re-dispatching after refreshing nearby drivers.',
+        });
+        await order.save();
+    }
+
+    await dispatchNextDriver(
+        order._id,
+        io,
+        exhausted ? 'Re-dispatch retry.' : 'Continuing candidate queue.',
+    );
 
     return Order.findById(order._id)
         .populate('user_id', 'name phone average_rating')
         .populate('driver_id', 'name phone vehicle_type vehicle_number average_rating location');
+};
+
+/** When a driver goes online, immediately try to match searching orders near them. */
+const wakeSearchingOrdersNearDriver = async (driver, io, options = {}) => {
+    const { force = false } = options;
+    if (!driver?.is_active || !io) return;
+    if (!(await isDriverDispatchable(driver))) return;
+
+    const pos = getDriverLatLng(driver);
+    if (!pos) return;
+
+    const driverKey = String(driver._id);
+    if (!force) {
+        const lastWake = lastDriverWakeRef.get(driverKey) || 0;
+        if (Date.now() - lastWake < DRIVER_WAKE_COOLDOWN_MS) return;
+    }
+    lastDriverWakeRef.set(driverKey, Date.now());
+
+    try {
+        const searchingOrders = await Order.find({ status: 'searching' }).limit(25);
+        for (const order of searchingOrders) {
+            if (!order.pickup?.lat || !order.pickup?.lng) continue;
+            const dist = haversineKm(
+                pos.lat,
+                pos.lng,
+                Number(order.pickup.lat),
+                Number(order.pickup.lng),
+            );
+            if (dist > DISPATCH_RADIUS_KM) continue;
+            if (order.vehicle_type && driver.vehicle_type
+                && !new RegExp(`^${order.vehicle_type}$`, 'i').test(String(driver.vehicle_type))) {
+                continue;
+            }
+            await reconcileSearchingOrderDispatch(order, io, { force: true });
+        }
+    } catch (err) {
+        console.error('[wakeSearchingOrdersNearDriver] Error:', err.message);
+    }
 };
 
 const filterDispatchableDrivers = async (drivers) => {
@@ -594,18 +651,18 @@ const getPendingOrdersForDriver = async (req, res) => {
         const vehicle_type = driver.vehicle_type;
 
         // Rapido-style: driver should only see orders currently offered to them.
-        const now = new Date();
         const pendingFilter = {
             status: 'searching',
             offered_driver_id: String(driver_id),
-            offer_expires_at: { $gt: now },
         };
         if (vehicle_type) {
             pendingFilter.vehicle_type = { $regex: new RegExp(`^${vehicle_type}$`, 'i') };
         }
         const possibleOrders = await Order.find(pendingFilter).sort({ createdAt: 1 });
 
-        const selectedOrder = possibleOrders[0] || null;
+        const selectedOrder = possibleOrders.find(
+            (o) => o.offer_expires_at && offerExpiresMs(o.offer_expires_at) > Date.now(),
+        ) || null;
 
         return res.status(200).json({ pending_order: selectedOrder });
     } catch (error) {
@@ -1455,6 +1512,7 @@ module.exports = {
     getDriverWallet,
     getNearbyDriversForMap,
     getPendingOrdersForDriver,
+    wakeSearchingOrdersNearDriver,
     getRoute,
     deleteOrder,
 };
