@@ -4,7 +4,7 @@ const Payment = require('../models/Payment');
 
 const getAllUsers = async (req, res) => {
     try {
-        const data = await User.find({});
+        const data = await User.find({ is_active: true });
         return res.status(200).json(data);
     } catch (error) {
         return res.status(500).json({ error: error.message });
@@ -48,23 +48,44 @@ const deleteUser = async (req, res) => {
 
         const user = await User.findById(id);
         if (!user) return res.status(404).json({ error: 'User not found' });
+        if (user.is_active === false) {
+            return res.status(404).json({ error: 'User not found' });
+        }
 
         const [orderCount, paymentCount] = await Promise.all([
             Order.countDocuments({ user_id: id }),
             Payment.countDocuments({ user_id: id }),
         ]);
 
-        if (orderCount > 0 || paymentCount > 0) {
-            return res.status(409).json({
-                error: 'Cannot delete customer with existing orders or payments. Block the account instead.',
-                code: 'HAS_HISTORY',
+        const hasHistory = orderCount > 0 || paymentCount > 0;
+
+        if (hasHistory) {
+            // Soft delete: hide from admin/app, keep order/payment records intact
+            await User.findByIdAndUpdate(
+                id,
+                {
+                    is_active: false,
+                    is_blocked: true,
+                    block_reason: 'Account removed by admin',
+                    name: 'Deleted User',
+                    phone: `deleted_${id}`,
+                    email: null,
+                    saved_addresses: [],
+                    fcm_token: '',
+                    profile_image: '',
+                },
+                { new: true },
+            );
+            return res.status(200).json({
+                message: 'Customer removed from system. Order history preserved.',
+                soft_delete: true,
                 order_count: orderCount,
                 payment_count: paymentCount,
             });
         }
 
         await User.findByIdAndDelete(id);
-        return res.status(200).json({ message: 'Customer deleted successfully' });
+        return res.status(200).json({ message: 'Customer deleted successfully', soft_delete: false });
     } catch (error) {
         return res.status(500).json({ error: error.message });
     }
