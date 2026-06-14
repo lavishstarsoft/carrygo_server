@@ -400,7 +400,8 @@ function createModel(table, hooks = {}) {
             const existing = await Model.findById(id).exec();
             if (!existing) return null;
             const supabase = getSupabaseAdmin();
-            await supabase.from(table).delete().eq('id', String(id));
+            const { error } = await supabase.from(table).delete().eq('id', String(id));
+            if (error) throw new Error(`[${table}] delete: ${error.message}`);
             return existing;
         },
 

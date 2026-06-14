@@ -1,6 +1,7 @@
 const Order = require('../models/Order');
 const Driver = require('../models/Driver');
 const User = require('../models/User');
+const Payment = require('../models/Payment');
 const Notification = require('../models/Notification');
 const { getDistanceAndDuration, getDirections, reverseGeocode } = require('../services/googleMaps');
 const Pricing = require('../models/Pricing');
@@ -1477,8 +1478,16 @@ const deleteOrder = async (req, res) => {
             await setDriverTripState(order.driver_id, { onTrip: false });
         }
 
-        // Permanently delete order
-        await Order.findByIdAndDelete(id);
+        // Clear any driver pointer to this order
+        await Driver.updateMany({ current_order_id: String(id) }, { current_order_id: null });
+
+        // Delete linked payments first (payments.order_id FK blocks order delete)
+        await Payment.deleteMany({ order_id: String(id) });
+
+        const deleted = await Order.findByIdAndDelete(id);
+        if (!deleted) {
+            return res.status(500).json({ error: 'Failed to delete order from database' });
+        }
 
         // Real-time update to update any active admin UI
         const io = req.app.get('io');
