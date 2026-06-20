@@ -162,6 +162,10 @@ const addSavedAddress = async (req, res) => {
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
+        if (!user.saved_addresses) {
+            user.saved_addresses = [];
+        }
+
         // Check if same title already exists and update it
         const existingIndex = user.saved_addresses.findIndex(a => a.title === title);
         if (existingIndex >= 0) {
@@ -186,7 +190,7 @@ const deleteSavedAddress = async (req, res) => {
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        user.saved_addresses = user.saved_addresses.filter(
+        user.saved_addresses = (user.saved_addresses || []).filter(
             addr => addr._id.toString() !== addressId
         );
         await user.save();
