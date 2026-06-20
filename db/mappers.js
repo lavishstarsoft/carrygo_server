@@ -119,6 +119,44 @@ const walletTransactionFromRow = (row) => {
     return doc;
 };
 
+const couponFromRow = (row) => {
+    const doc = baseFromRow(row);
+    if (!doc) return null;
+    if (doc.isActive !== undefined) {
+        doc.isActive = doc.is_active;
+        delete doc.is_active;
+    }
+    if (doc.discountType !== undefined) {
+        doc.discountType = doc.discount_type;
+        delete doc.discount_type;
+    }
+    if (doc.discountValue !== undefined) {
+        doc.discountValue = doc.discount_value;
+        delete doc.discount_value;
+    }
+    if (doc.minOrderValue !== undefined) {
+        doc.minOrderValue = doc.min_order_value;
+        delete doc.min_order_value;
+    }
+    if (doc.maxDiscount !== undefined) {
+        doc.maxDiscount = doc.max_discount;
+        delete doc.max_discount;
+    }
+    if (doc.timesUsed !== undefined) {
+        doc.timesUsed = doc.times_used;
+        delete doc.times_used;
+    }
+    if (doc.usageLimit !== undefined) {
+        doc.usageLimit = doc.usage_limit;
+        delete doc.usage_limit;
+    }
+    if (doc.validFrom) doc.validFrom = toDate(doc.valid_from);
+    if (doc.validTo) doc.validTo = toDate(doc.valid_to);
+    delete doc.valid_from;
+    delete doc.valid_to;
+    return doc;
+};
+
 const FROM_ROW = {
     users: userFromRow,
     drivers: driverFromRow,
@@ -131,6 +169,7 @@ const FROM_ROW = {
     settings: settingFromRow,
     admins: adminFromRow,
     wallet_transactions: walletTransactionFromRow,
+    coupons: couponFromRow,
 };
 
 // ─── API doc → Row (snake_case DB) ───────────────────────────────────────────
@@ -266,6 +305,22 @@ const walletTransactionToRow = (doc) => {
     return row;
 };
 
+const couponToRow = (doc) => {
+    const row = baseToRow(doc);
+    const fields = ['code', 'title', 'description'];
+    fields.forEach((f) => { if (doc[f] !== undefined) row[f] = doc[f]; });
+    if (doc.isActive !== undefined) row.is_active = doc.isActive;
+    if (doc.discountType !== undefined) row.discount_type = doc.discountType;
+    if (doc.discountValue !== undefined) row.discount_value = doc.discountValue;
+    if (doc.minOrderValue !== undefined) row.min_order_value = doc.minOrderValue;
+    if (doc.maxDiscount !== undefined) row.max_discount = doc.maxDiscount;
+    if (doc.timesUsed !== undefined) row.times_used = doc.timesUsed;
+    if (doc.usageLimit !== undefined) row.usage_limit = doc.usageLimit;
+    if (doc.validFrom) row.valid_from = new Date(doc.validFrom).toISOString();
+    if (doc.validTo) row.valid_to = new Date(doc.validTo).toISOString();
+    return row;
+};
+
 const TO_ROW = {
     users: userToRow,
     drivers: driverToRow,
@@ -278,6 +333,7 @@ const TO_ROW = {
     settings: settingToRow,
     admins: adminToRow,
     wallet_transactions: walletTransactionToRow,
+    coupons: couponToRow,
 };
 
 module.exports = {
