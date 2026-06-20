@@ -197,6 +197,39 @@ const deleteSavedAddress = async (req, res) => {
     }
 };
 
+// POST /api/user-auth/recent-search
+const addRecentSearch = async (req, res) => {
+    const { place } = req.body;
+    try {
+        const user = await User.findById(req.user.id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        if (!user.recent_searches) {
+            user.recent_searches = [];
+        }
+
+        const placeId = place.place_id || place.description;
+        // Remove if exists
+        user.recent_searches = user.recent_searches.filter(h => (h.place_id || h.description) !== placeId);
+        
+        // Add to front
+        user.recent_searches.unshift(place);
+        
+        // Keep max 10
+        if (user.recent_searches.length > 10) {
+            user.recent_searches.pop();
+        }
+
+        user.markModified('recent_searches');
+        await user.save();
+
+        res.json(user.recent_searches);
+    } catch (error) {
+        console.error('[User] Save Recent Search Error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+};
+
 module.exports = {
     sendUserOTP,
     verifyUserOTP,
@@ -204,4 +237,5 @@ module.exports = {
     updateUserProfile,
     addSavedAddress,
     deleteSavedAddress,
+    addRecentSearch,
 };

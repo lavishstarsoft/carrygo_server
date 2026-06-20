@@ -13,5 +13,6 @@ router.get('/me', userAuth, userAuthController.getUserProfile);
 router.put('/profile', userAuth, userAuthController.updateUserProfile);
 router.post('/saved-address', userAuth, userAuthController.addSavedAddress);
 router.delete('/saved-address/:addressId', userAuth, userAuthController.deleteSavedAddress);
+router.post('/recent-search', userAuth, userAuthController.addRecentSearch);
 
 module.exports = router;
