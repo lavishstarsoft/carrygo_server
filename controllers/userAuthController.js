@@ -224,10 +224,11 @@ const addRecentSearch = async (req, res) => {
             user.recent_searches.pop();
         }
 
+        const recent = user.recent_searches;
         user.markModified('recent_searches');
         await user.save();
 
-        res.json(user.recent_searches);
+        res.json(recent || []);
     } catch (error) {
         console.error('[User] Save Recent Search Error:', error.message);
         res.status(500).json({ error: error.message });

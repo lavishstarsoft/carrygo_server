@@ -218,7 +218,9 @@ const orderToRow = (doc) => {
         if (row[f] != null && row[f] !== '') row[f] = Math.round(Number(row[f]) || 0);
     });
     ['user_id','driver_id','payment_id','offered_driver_id'].forEach((f) => {
-        if (row[f]) row[f] = String(row[f]);
+        if (row[f]) {
+            row[f] = typeof row[f] === 'object' ? String(row[f]._id || row[f].id) : String(row[f]);
+        }
     });
     if (row.cancelled_at) row.cancelled_at = new Date(row.cancelled_at).toISOString();
     if (row.offer_expires_at) row.offer_expires_at = new Date(row.offer_expires_at).toISOString();
@@ -244,7 +246,11 @@ const paymentToRow = (doc) => {
         'razorpay_payment_id','razorpay_signature','platform_commission','driver_earnings',
         'refund_amount','refund_reason','refund_id'];
     fields.forEach((f) => { if (doc[f] !== undefined) row[f] = doc[f]; });
-    ['order_id','user_id','driver_id'].forEach((f) => { if (row[f]) row[f] = String(row[f]); });
+    ['order_id','user_id','driver_id'].forEach((f) => { 
+        if (row[f]) {
+            row[f] = typeof row[f] === 'object' ? String(row[f]._id || row[f].id) : String(row[f]);
+        }
+    });
     return row;
 };
 
@@ -301,7 +307,11 @@ const walletTransactionToRow = (doc) => {
         'wallet_delta', 'balance_after', 'note',
     ];
     fields.forEach((f) => { if (doc[f] !== undefined) row[f] = doc[f]; });
-    ['driver_id', 'order_id'].forEach((f) => { if (row[f]) row[f] = String(row[f]); });
+    ['driver_id', 'order_id'].forEach((f) => { 
+        if (row[f]) {
+            row[f] = typeof row[f] === 'object' ? String(row[f]._id || row[f].id) : String(row[f]);
+        }
+    });
     return row;
 };
 
