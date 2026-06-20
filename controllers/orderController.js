@@ -296,7 +296,7 @@ const createBooking = async (req, res) => {
     const {
         pickup, dropoff, vehicle_type, vehicle_body_type,
         payment_method, goods_type, goods_description,
-        is_scheduled, scheduled_at,
+        is_scheduled, scheduled_at, coupon_code
     } = req.body;
 
     if (!pickup?.address || !pickup?.lat || !pickup?.lng) {
@@ -312,6 +312,33 @@ const createBooking = async (req, res) => {
     try {
         // Calculate fare
         const fareResult = await calculateFare(pickup, dropoff, vehicle_type, vehicle_body_type);
+
+        let finalFare = { ...fareResult.fare };
+        let appliedCouponCode = null;
+        let finalDiscount = 0;
+
+        if (coupon_code) {
+            const Coupon = require('../models/Coupon');
+            const coupon = await Coupon.findOne({ code: coupon_code.toUpperCase(), isActive: true });
+            if (coupon && finalFare.total >= coupon.minOrderValue) {
+                if (coupon.discountType === 'flat') {
+                    finalDiscount = coupon.discountValue;
+                } else if (coupon.discountType === 'percentage') {
+                    finalDiscount = (finalFare.total * coupon.discountValue) / 100;
+                    if (coupon.maxDiscount > 0 && finalDiscount > coupon.maxDiscount) {
+                        finalDiscount = coupon.maxDiscount;
+                    }
+                }
+                if (finalDiscount > finalFare.total) finalDiscount = finalFare.total;
+                
+                finalFare.total -= finalDiscount;
+                appliedCouponCode = coupon.code;
+                
+                // Increment times used
+                coupon.timesUsed += 1;
+                await coupon.save();
+            }
+        }
 
         // Get route polyline
         const dirResult = await getDirections(pickup.lat, pickup.lng, dropoff.lat, dropoff.lng);
@@ -330,7 +357,9 @@ const createBooking = async (req, res) => {
             duration_min: Math.round(Number(fareResult.duration_min) || 0),
             estimated_travel_mins: Math.round(Number(fareResult.travel_duration_min) || 0),
             route_polyline: dirResult.success ? dirResult.polyline : '',
-            fare: fareResult.fare,
+            fare: finalFare,
+            coupon_code: appliedCouponCode,
+            discount_amount: finalDiscount,
             payment_method: payment_method ? payment_method.toLowerCase() : 'cash',
             payment_status: 'pending',
             pickup_otp,

@@ -18,6 +18,7 @@ const userAuthRoutes = require('./routes/userAuthRoutes');
 const fareRoutes = require('./routes/fareRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const mapsRoutes = require('./routes/mapsRoutes');
+const couponRoutes = require('./routes/couponRoutes');
 const connectDB = require('./config/db');
 const { startProductionJobs } = require('./services/productionJobs');
 
@@ -133,6 +134,7 @@ app.use('/api/user-auth', userAuthRoutes);
 app.use('/api/fare', fareRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/maps', mapsRoutes);
+app.use('/api/coupons', couponRoutes);
 
 // Serve uploaded files
 app.use('/uploads', express.static('uploads'));
