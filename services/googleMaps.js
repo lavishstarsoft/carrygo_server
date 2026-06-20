@@ -680,9 +680,41 @@ const reverseGeocodeDetailed = async (lat, lng) => {
 
             const data = response.data;
             if (data.status === 'OK' && data.results[0]) {
+                const result = data.results[0];
+                const components = result.address_components || [];
+                
+                // Try to find point of interest/landmark name
+                const poiTypes = ['establishment', 'point_of_interest', 'premise', 'subpremise', 'landmark', 'park', 'airport', 'bus_station', 'train_station'];
+                let title = null;
+                for (const type of poiTypes) {
+                    const comp = components.find(c => c.types.includes(type));
+                    if (comp) {
+                        title = comp.long_name;
+                        break;
+                    }
+                }
+                
+                // If not found, try to find street/road name
+                if (!title) {
+                    const route = components.find(c => c.types.includes('route'));
+                    if (route) title = route.long_name;
+                }
+                
+                // If not found, try to find neighborhood name
+                if (!title) {
+                    const sublocality = components.find(c => c.types.includes('sublocality') || c.types.includes('sublocality_level_1'));
+                    if (sublocality) title = sublocality.long_name;
+                }
+
+                // If still not found, fallback to first part of address
+                if (!title) {
+                    title = result.formatted_address.split(',')[0];
+                }
+
                 return {
                     success: true,
-                    formatted_address: data.results[0].formatted_address,
+                    formatted_address: result.formatted_address,
+                    title: title,
                 };
             }
             markGoogleRejected(data.status);
@@ -703,9 +735,13 @@ const reverseGeocodeDetailed = async (lat, lng) => {
             timeout: 8000,
         });
 
+        const address = response.data?.address || {};
+        const title = address.amenity || address.shop || address.building || address.road || address.suburb || address.neighbourhood || address.city || '';
+
         return {
             success: true,
             formatted_address: response.data?.display_name || '',
+            title: title || (response.data?.display_name || '').split(',')[0],
         };
     } catch (error) {
         console.error('[Nominatim] Detailed reverse geocode Error:', error.message);
