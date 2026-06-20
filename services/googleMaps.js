@@ -666,6 +666,54 @@ const reverseGeocode = async (lat, lng) => {
 };
 
 /**
+ * Reverse geocode lat/lng to get a detailed formatted address (no locality restriction)
+ */
+const reverseGeocodeDetailed = async (lat, lng) => {
+    if (GOOGLE_MAPS_API_KEY) {
+        try {
+            const response = await axios.get('https://maps.googleapis.com/maps/api/geocode/json', {
+                params: {
+                    latlng: `${lat},${lng}`,
+                    key: GOOGLE_MAPS_API_KEY,
+                },
+            });
+
+            const data = response.data;
+            if (data.status === 'OK' && data.results[0]) {
+                return {
+                    success: true,
+                    formatted_address: data.results[0].formatted_address,
+                };
+            }
+            markGoogleRejected(data.status);
+        } catch (error) {
+            console.warn('[GoogleMaps] Detailed reverse geocode error:', error.message);
+        }
+    }
+
+    try {
+        const response = await axios.get('https://nominatim.openstreetmap.org/reverse', {
+            params: {
+                lat,
+                lon: lng,
+                format: 'json',
+                addressdetails: 1,
+            },
+            headers: NOMINATIM_HEADERS,
+            timeout: 8000,
+        });
+
+        return {
+            success: true,
+            formatted_address: response.data?.display_name || '',
+        };
+    } catch (error) {
+        console.error('[Nominatim] Detailed reverse geocode Error:', error.message);
+        return { success: false, error: error.message };
+    }
+};
+
+/**
  * Get address suggestions from Google Places Autocomplete API
  */
 const getAutocompleteSuggestions = async (input, options = {}) => {
@@ -777,5 +825,6 @@ module.exports = {
     geocodeAddress,
     getPlaceDetails,
     reverseGeocode,
+    reverseGeocodeDetailed,
     getAutocompleteSuggestions,
 };

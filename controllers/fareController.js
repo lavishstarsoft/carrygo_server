@@ -1,6 +1,6 @@
 const Pricing = require('../models/Pricing');
 const DeliveryZone = require('../models/DeliveryZone');
-const { getDistanceAndDuration, reverseGeocode, geocodeAddress, getPlaceDetails, getAutocompleteSuggestions } = require('../services/googleMaps');
+const { getDistanceAndDuration, reverseGeocode, reverseGeocodeDetailed, geocodeAddress, getPlaceDetails, getAutocompleteSuggestions } = require('../services/googleMaps');
 const { computeTripFare } = require('../services/fareCalculation');
 
 // ─── Geometry Helpers ────────────────────────────────────────────────────────
@@ -367,6 +367,23 @@ const autocomplete = async (req, res) => {
 };
 
 /**
+ * GET /api/fare/reverse-geocode
+ * Resolve lat/lng to highly accurate formatted address
+ */
+const reverseGeocodeRoute = async (req, res) => {
+    const { lat, lng } = req.query;
+    if (!lat || !lng) return res.status(400).json({ error: 'lat and lng are required' });
+
+    try {
+        const result = await reverseGeocodeDetailed(Number(lat), Number(lng));
+        if (!result.success) return res.status(400).json({ error: result.error });
+        return res.status(200).json(result);
+    } catch (error) {
+        return res.status(500).json({ error: error.message });
+    }
+};
+
+/**
  * Delivery Zone Management
  */
 const getZones = async (req, res) => {
@@ -418,6 +435,7 @@ module.exports = {
     geocode,
     placeDetails,
     autocomplete,
+    reverseGeocodeRoute,
     getZones,
     upsertZone,
     deleteZone,
